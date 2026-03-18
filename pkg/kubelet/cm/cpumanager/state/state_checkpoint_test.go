@@ -59,10 +59,8 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore default cpu set",
 			`{
-				"policyName": "none",
-				"defaultCPUSet": "4-6",
-				"entries": {},
-				"checksum": 354655845
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"4-6\"}",
+				"checksum": 657950972
 			}`,
 			"none",
 			containermap.ContainerMap{},
@@ -75,15 +73,8 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore valid checkpoint",
 			`{
-				"policyName": "none",
-				"defaultCPUSet": "1-3",
-				"entries": {
-					"pod": {
-						"container1": "4-6",
-						"container2": "1-3"
-					}
-				},
-				"checksum": 3610638499
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"1-3\",\"entries\":{\"pod\":{\"container1\":\"4-6\",\"container2\":\"1-3\"}}}",
+				"checksum": 1401970430
 			}`,
 			"none",
 			containermap.ContainerMap{},
@@ -102,10 +93,8 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore checkpoint with invalid checksum",
 			`{
-				"policyName": "none",
-				"defaultCPUSet": "4-6",
-				"entries": {},
-				"checksum": 1337
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"4-6\"}",
+				"checksum": 1234
 			}`,
 			"none",
 			containermap.ContainerMap{},
@@ -125,10 +114,8 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore checkpoint with invalid policy name",
 			`{
-				"policyName": "other",
-				"defaultCPUSet": "1-3",
-				"entries": {},
-				"checksum": 1394507217
+				"data": "{\"policyName\":\"other\",\"defaultCPUSet\":\"4-6\"}",
+				"checksum": 633188390
 			}`,
 			"none",
 			containermap.ContainerMap{},
@@ -139,10 +126,8 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore checkpoint with unparsable default cpu set",
 			`{
-				"policyName": "none",
-				"defaultCPUSet": "1.3",
-				"entries": {},
-				"checksum": 3021697696
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"1.3\"}",
+				"checksum": 3033143655
 			}`,
 			"none",
 			containermap.ContainerMap{},
@@ -153,15 +138,8 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore checkpoint with unparsable assignment entry",
 			`{
-				"policyName": "none",
-				"defaultCPUSet": "1-3",
-				"entries": {
-					"pod": {
-						"container1": "4-6",
-						"container2": "asd"
-					}
-				},
-				"checksum": 962272150
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"1-3\",\"entries\":{\"pod\":{\"container1\":\"4-6\",\"container2\":\"asd\"}}}",
+				"checksum": 350330669
 			}`,
 			"none",
 			containermap.ContainerMap{},
@@ -301,20 +279,8 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore valid v3 checkpoint with PodLevelResourceManagers enabled",
 			`{
-				"policyName": "none",
-				"defaultCPUSet": "1-3",
-				"entries": {
-					"pod": {
-						"container1": "4-6",
-						"container2": "1-3"
-					}
-				},
-				"podEntries": {
-					"pod": {
-						"cpuSet": "4-6"
-					}
-				},
-				"checksum": 2649431787
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"1-3\",\"entries\":{\"pod\":{\"container1\":\"4-6\",\"container2\":\"1-3\"}},\"podEntries\":{\"pod\":{\"cpuSet\":\"4-6\"}}}",
+				"checksum": 3246418529
 			}`,
 			"none",
 			containermap.ContainerMap{},
@@ -338,24 +304,12 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore valid v3 checkpoint with PodLevelResourceManagers disabled",
 			`{
-				"policyName": "none",
-				"defaultCPUSet": "1-3",
-				"entries": {
-					"pod": {
-						"container1": "4-6",
-						"container2": "1-3"
-					}
-				},
-				"podEntries": {
-					"pod": {
-						"cpuSet": "4-6"
-					}
-				},
-				"checksum": 2649431787
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"1-3\",\"entries\":{\"pod\":{\"container1\":\"4-6\",\"container2\":\"1-3\"}},\"podEntries\":{\"pod\":{\"cpuSet\":\"4-6\"}}}",
+				"checksum": 3246418529
 			}`,
 			"none",
 			containermap.ContainerMap{},
-			"could not restore state from checkpoint",
+			"",
 			&stateMemory{
 				assignments: ContainerCPUAssignments{
 					"pod": map[string]cpuset.CPUSet{
@@ -384,17 +338,50 @@ func TestCheckpointStateRestore(t *testing.T) {
 		{
 			"Restore corrupt checkpoint with PodLevelResourceManagers enabled",
 			`{
-				"policyName": "none",
-				"defaultCPUSet": "1-3",
-				"entries": {},
-				"podEntries": {},
-				"checksum": 12345
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"4-6\"}",
+				"checksum": 1234
 			}`,
 			"none",
 			containermap.ContainerMap{},
 			"checkpoint is corrupted",
 			&stateMemory{},
 			true,
+		},
+		{
+			"Restore checkpoint without data section",
+			`{
+				"checksum": 1234
+			}`,
+			"none",
+			containermap.ContainerMap{},
+			"checkpoint is corrupted",
+			&stateMemory{},
+			false,
+		},
+		{
+			"Restore checkpoint without checksum section falls back to empty v2 version",
+			`{
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"4-6\"}"
+			}`,
+			"none",
+			containermap.ContainerMap{},
+			`configured policy "none" differs from state checkpoint policy ""`,
+			&stateMemory{},
+			false,
+		},
+		{
+			"Restore checkpoint without unknown fields in data section",
+			`{
+				"data": "{\"policyName\":\"none\",\"defaultCPUSet\":\"4-6\",\"unknownField\":\"value\"}",
+				"checksum": 3492408555
+			}`,
+			"none",
+			containermap.ContainerMap{},
+			"",
+			&stateMemory{
+				defaultCPUSet: cpuset.New(4, 5, 6),
+			},
+			false,
 		},
 	}
 

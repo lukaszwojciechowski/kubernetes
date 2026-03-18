@@ -120,11 +120,7 @@ func (sc *stateCheckpoint) restoreState() error {
 
 	var checkpoint any
 	var err error
-	if utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {
-		checkpoint, err = sc.loadAndMigrateCheckpointV3()
-	} else {
-		checkpoint, err = sc.loadAndMigrateCheckpointV2()
-	}
+	checkpoint, err = sc.loadAndMigrateCheckpointV3()
 
 	if err != nil {
 		if errors.Is(err, cperrors.ErrCheckpointNotFound) {
@@ -156,7 +152,9 @@ func (sc *stateCheckpoint) restoreState() error {
 			}
 		}
 		maps.Copy(tmpPodAssignments, cp.PodEntries)
-		sc.cache.SetPodCPUAssignments(tmpPodAssignments)
+		if utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {
+			sc.cache.SetPodCPUAssignments(tmpPodAssignments)
+		}
 	case *CPUManagerCheckpointV2:
 		if sc.policyName != cp.PolicyName {
 			return fmt.Errorf("configured policy %q differs from state checkpoint policy %q", sc.policyName, cp.PolicyName)
@@ -266,10 +264,7 @@ func (sc *stateCheckpoint) loadCheckpointV1() (*CPUManagerCheckpointV1, error) {
 
 // saves state to a checkpoint, caller is responsible for locking
 func (sc *stateCheckpoint) storeState() error {
-	if utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {
-		return sc.storeStateV3()
-	}
-	return sc.storeStateV2()
+	return sc.storeStateV3()
 }
 
 // saves state to a checkpoint, caller is responsible for locking
@@ -286,8 +281,10 @@ func (sc *stateCheckpoint) storeStateV3() error {
 		}
 	}
 
-	podAssignments := sc.cache.GetPodCPUAssignments()
-	maps.Copy(checkpoint.PodEntries, podAssignments)
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {
+		podAssignments := sc.cache.GetPodCPUAssignments()
+		maps.Copy(checkpoint.PodEntries, podAssignments)
+	}
 
 	err := sc.checkpointManager.CreateCheckpoint(sc.checkpointName, checkpoint)
 	if err != nil {
