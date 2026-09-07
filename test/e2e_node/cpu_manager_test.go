@@ -35,6 +35,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/klog/v2"
@@ -46,6 +47,7 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 	"k8s.io/utils/cpuset"
 
+	"k8s.io/kubernetes/test/e2e/common/node/framework/podresize"
 	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -1812,6 +1814,58 @@ var _ = SIGDescribe("CPU Manager", ginkgo.Ordered, ginkgo.ContinueOnFailure, fra
 			gomega.Expect(pod).To(HaveContainerCPUsCount(ctnName, 3))
 			gomega.Expect(pod).To(HaveContainerCPUsASubsetOf(ctnName, onlineCPUs))
 			gomega.Expect(pod).ToNot(HaveContainerCPUsOverlapWith(ctnName, reservedCPUs))
+		})
+
+		// Resizing the CPUs of a container holding exclusive CPUs is not supported yet: the static
+		// policy ignores the resize operation, so the cpuset would silently stay unchanged.
+		// Resizing the memory, however, is allowed and still makes the kubelet regenerate the *full*
+		// LinuxContainerResources for the container, CPU quota included. This is the cheapest way to
+		// check that a quota which started out disabled (-1/"max") survives an in-place resize.
+		ginkgo.It("should keep the quota disabled for guaranteed pod with exclusive CPUs across a memory resize", func(ctx context.Context) {
+			cpuCount := 2
+			skipIfAllocatableCPUsLessThan(getLocalNode(ctx, f), cpuCount)
+
+			ctnName := "gu-container-cfsquota-disabled"
+			pod := makeCPUManagerPod("gu-pod-cfsquota-off-resize", []ctnAttribute{
+				{
+					ctnName:    ctnName,
+					cpuRequest: "2",
+					cpuLimit:   "2",
+				},
+			})
+			ginkgo.By("creating the test pod")
+			pod = createPodSync(ctx, pod)
+
+			ginkgo.By("checking the CFS quota is disabled before the resize")
+			gomega.Expect(pod).To(HaveSandboxQuota("max"))
+			gomega.Expect(pod).To(HaveContainerQuota(ctnName, "max"))
+			gomega.Expect(pod).To(HaveContainerStatusCPULimits(ctnName, "2"))
+			gomega.Expect(pod).To(HaveContainerStatusCPURequests(ctnName, "2"))
+			gomega.Expect(pod).To(HaveContainerCPUsCount(ctnName, 2))
+
+			ginkgo.By("resizing the container memory in place")
+			// Only the memory keys are patched, CPU request and limit are untouched,
+			// so the container keeps its exclusive CPUs.
+			patchBytes := []byte(fmt.Sprintf(`{"spec":{"containers":[{"name":%q,"resources":{"limits":{"memory":"200Mi"},"requests":{"memory":"200Mi"}}}]}}`, ctnName))
+			patchedPod, err := f.ClientSet.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name,
+				apitypes.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "resize")
+			framework.ExpectNoError(err, "failed to patch the container memory")
+
+			resizedPod := podresize.WaitForPodResizeActuation(ctx, f, e2epod.NewPodClient(f), patchedPod, nil)
+
+			ginkgo.By("checking the memory resize was actuated")
+			gomega.Expect(resizedPod.Status.ContainerStatuses).To(gomega.HaveLen(1))
+			ctnStatus := resizedPod.Status.ContainerStatuses[0]
+			gomega.Expect(ctnStatus.Resources).ToNot(gomega.BeNil())
+			gomega.Expect(ctnStatus.Resources.Limits.Memory().String()).To(gomega.Equal("200Mi"))
+			gomega.Expect(ctnStatus.Resources.Requests.Memory().String()).To(gomega.Equal("200Mi"))
+
+			ginkgo.By("checking the CFS quota is still disabled after the resize")
+			gomega.Expect(resizedPod).To(HaveSandboxQuota("max"))
+			gomega.Expect(resizedPod).To(HaveContainerQuota(ctnName, "max"))
+			gomega.Expect(resizedPod).To(HaveContainerStatusCPULimits(ctnName, "2"))
+			gomega.Expect(resizedPod).To(HaveContainerStatusCPURequests(ctnName, "2"))
+			gomega.Expect(resizedPod).To(HaveContainerCPUsCount(ctnName, 2))
 		})
 
 		ginkgo.It("should enforce for guaranteed pod", func(ctx context.Context) {
