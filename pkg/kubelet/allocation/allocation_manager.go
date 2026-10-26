@@ -590,7 +590,7 @@ func (m *manager) handlePendingAllocation(ctx context.Context, pod *v1.Pod) (lif
 
 	// Desired pod != allocated pod. Can we update the allocation to the desired pod?
 	allocatedPods := slices.DeleteFunc(m.getAllocatedPods(m.podProvider.GetActivePods()), func(p *v1.Pod) bool { return p.UID == pod.UID })
-	result := m.canAdmitPod(ctx, &lifecycle.PodAdmitAttributes{
+	attrs := &lifecycle.PodAdmitAttributes{
 		Pod:       pod,
 		OtherPods: allocatedPods,
 		Operation: lifecycle.UpdateOperation,
@@ -598,12 +598,23 @@ func (m *manager) handlePendingAllocation(ctx context.Context, pod *v1.Pod) (lif
 			AllocatedPod: allocatedPod,
 			Resize:       resizeRequested,
 		},
-	})
+	}
+	// Every path that does not reach the commit point completes the transaction
+	// as failed, including a rejection, which is not an error.
+	committed := false
+	defer func() {
+		if !committed {
+			m.completeAdmit(ctx, attrs, lifecycle.AdmitFailure)
+		}
+	}()
+	result := m.canAdmitPod(ctx, attrs)
 	if result.Admit {
 		// Update pod resource allocation checkpoint
 		if err := m.SetAllocatedPod(logger, pod); err != nil {
 			return lifecycle.PodAdmitResult{}, false, err
 		}
+		committed = true
+		m.completeAdmit(ctx, attrs, lifecycle.AdmitSuccess)
 		m.statusManager.ClearPodResizePendingCondition(pod.UID, metrics.DeferredResizeResolutionAccepted)
 
 		if resizeRequested {
@@ -696,6 +707,17 @@ func (m *manager) canAdmitPod(ctx context.Context, attrs *lifecycle.PodAdmitAttr
 	}
 
 	return lifecycle.PodAdmitResult{Admit: true}
+}
+
+// completeAdmit completes the admission in every admit handler that implements
+// lifecycle.PodAdmitTransactionalHandler, whether its Admit was called, called in
+// dry run, or not called.
+func (m *manager) completeAdmit(ctx context.Context, attrs *lifecycle.PodAdmitAttributes, result lifecycle.AdmitResult) {
+	for _, podAdmitHandler := range m.admitHandlers {
+		if tx, ok := podAdmitHandler.(lifecycle.PodAdmitTransactionalHandler); ok {
+			tx.CompleteAdmit(ctx, attrs, result)
+		}
+	}
 }
 
 func (m *manager) getAllocatedPods(activePods []*v1.Pod) []*v1.Pod {
