@@ -3638,16 +3638,41 @@ func TestStaticPolicyLifecycleGetPodTopologyHints(t *testing.T) {
 }
 
 func TestStaticPolicyAdmissionRejectionType(t *testing.T) {
+	// State of a container which was admitted with 2 exclusive CPUs, used by the resize test cases.
+	resizeAssignments := func() state.ContainerCPUAssignments {
+		return state.ContainerCPUAssignments{
+			"fakePod": map[string]cpuset.CPUSet{
+				"fakeContainer": cpuset.New(1, 5),
+			},
+		}
+	}
+	resizeBaselines := func() state.ContainerCPUBaselines {
+		return state.ContainerCPUBaselines{
+			"fakePod": map[string]state.ContainerCPUBaseline{
+				"fakeContainer": {Baseline: cpuset.New(1, 5)},
+			},
+		}
+	}
+
 	testCases := []struct {
-		description      string
-		reservedCPUs     cpuset.CPUSet
-		options          map[string]string
-		defaultCPUSet    cpuset.CPUSet
-		request          string
-		expReason        string
-		expRejectionType lifecycle.RejectionType
+		description         string
+		operation           lifecycle.Operation
+		resizeExclusiveCPUs bool
+		reservedCPUs        cpuset.CPUSet
+		options             map[string]string
+		stAssignments       state.ContainerCPUAssignments
+		stBaselines         state.ContainerCPUBaselines
+		defaultCPUSet       cpuset.CPUSet
+		request             string
+		limit               string
+		expAdmit            bool
+		expReason           string
+		expRejectionType    lifecycle.RejectionType
+		expMessage          string
+		expAssignedCPUs     int
 	}{{
 		description:      "not enough free CPUs",
+		operation:        lifecycle.AddOperation,
 		reservedCPUs:     cpuset.New(),
 		defaultCPUSet:    cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
 		request:          "8000m",
@@ -3655,6 +3680,7 @@ func TestStaticPolicyAdmissionRejectionType(t *testing.T) {
 		expRejectionType: lifecycle.RejectionBlocked,
 	}, {
 		description:      "not enough free physical CPUs",
+		operation:        lifecycle.AddOperation,
 		reservedCPUs:     cpuset.New(0),
 		options:          map[string]string{FullPCPUsOnlyOption: "true"},
 		defaultCPUSet:    cpuset.New(1, 2, 3, 4, 5, 6, 7),
@@ -3663,16 +3689,124 @@ func TestStaticPolicyAdmissionRejectionType(t *testing.T) {
 		expRejectionType: lifecycle.RejectionBlocked,
 	}, {
 		description:      "request not a multiple of the CPUs per core",
+		operation:        lifecycle.AddOperation,
 		reservedCPUs:     cpuset.New(0),
 		options:          map[string]string{FullPCPUsOnlyOption: "true"},
 		defaultCPUSet:    cpuset.New(1, 2, 3, 4, 5, 6, 7),
 		request:          "1000m",
 		expReason:        ErrorSMTAlignment,
 		expRejectionType: lifecycle.RejectionInfeasible,
+	}, {
+		description:         "resize below baseline CPUs",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		reservedCPUs:        cpuset.New(0),
+		stAssignments:       resizeAssignments(),
+		stBaselines:         resizeBaselines(),
+		defaultCPUSet:       cpuset.New(0, 2, 3, 4, 6, 7),
+		request:             "1000m",
+		expReason:           v1.PodReasonInfeasible,
+		expRejectionType:    lifecycle.RejectionInfeasible,
+		expMessage:          "not allowed to reduce container exclusively allocated pool below baseline",
+	}, {
+		description:         "resize from exclusive to shared pool",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		reservedCPUs:        cpuset.New(0),
+		stAssignments:       resizeAssignments(),
+		stBaselines:         resizeBaselines(),
+		defaultCPUSet:       cpuset.New(0, 2, 3, 4, 6, 7),
+		request:             "2500m",
+		expReason:           v1.PodReasonInfeasible,
+		expRejectionType:    lifecycle.RejectionInfeasible,
+		expMessage:          "cannot move container from exclusive to shared pool",
+	}, {
+		description:         "resize from shared to exclusive pool",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		reservedCPUs:        cpuset.New(0),
+		stAssignments:       state.ContainerCPUAssignments{},
+		stBaselines:         state.ContainerCPUBaselines{},
+		defaultCPUSet:       cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+		request:             "2000m",
+		expReason:           v1.PodReasonInfeasible,
+		expRejectionType:    lifecycle.RejectionInfeasible,
+		expMessage:          "cannot move container from shared to exclusive pool",
+	}, {
+		description:         "resize beyond free CPUs",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		reservedCPUs:        cpuset.New(0),
+		stAssignments:       resizeAssignments(),
+		stBaselines:         resizeBaselines(),
+		defaultCPUSet:       cpuset.New(0, 2, 3, 4, 6, 7),
+		request:             "8000m",
+		expReason:           v1.PodReasonInfeasible,
+		expRejectionType:    lifecycle.RejectionInfeasible,
+		expMessage:          "Unable to resize container exclusively allocated pool",
+	}, {
+		description:         "resize not enough free physical CPUs",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		reservedCPUs:        cpuset.New(0),
+		options:             map[string]string{FullPCPUsOnlyOption: "true"},
+		stAssignments:       resizeAssignments(),
+		stBaselines:         resizeBaselines(),
+		defaultCPUSet:       cpuset.New(0, 2, 3, 4, 6, 7),
+		request:             "8000m",
+		expReason:           v1.PodReasonInfeasible,
+		expRejectionType:    lifecycle.RejectionInfeasible,
+		expMessage:          "not enough free physical CPUs",
+	}, {
+		description:         "resize request not a multiple of the CPUs per core",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		reservedCPUs:        cpuset.New(0),
+		options:             map[string]string{FullPCPUsOnlyOption: "true"},
+		stAssignments:       resizeAssignments(),
+		stBaselines:         resizeBaselines(),
+		defaultCPUSet:       cpuset.New(0, 2, 3, 4, 6, 7),
+		request:             "3000m",
+		expReason:           v1.PodReasonInfeasible,
+		expRejectionType:    lifecycle.RejectionInfeasible,
+		expMessage:          "not multiple cpus per core",
+	}, {
+		description:         "resize within free CPUs",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		reservedCPUs:        cpuset.New(0),
+		stAssignments:       resizeAssignments(),
+		stBaselines:         resizeBaselines(),
+		defaultCPUSet:       cpuset.New(0, 2, 3, 4, 6, 7),
+		request:             "4000m",
+		expAdmit:            true,
+		expAssignedCPUs:     4,
+	}, {
+		description:         "resize below baseline CPUs with InPlacePodVerticalScalingExclusiveCPUs disabled",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: false,
+		reservedCPUs:        cpuset.New(0),
+		stAssignments:       resizeAssignments(),
+		stBaselines:         resizeBaselines(),
+		defaultCPUSet:       cpuset.New(0, 2, 3, 4, 6, 7),
+		request:             "1000m",
+		expAdmit:            true,
+	}, {
+		description:         "resize of a burstable pod",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		reservedCPUs:        cpuset.New(0),
+		stAssignments:       state.ContainerCPUAssignments{},
+		stBaselines:         state.ContainerCPUBaselines{},
+		defaultCPUSet:       cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+		request:             "1000m",
+		limit:               "2000m",
+		expAdmit:            true,
 	}}
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.InPlacePodVerticalScalingExclusiveCPUs, tc.resizeExclusiveCPUs)
 			logger, _ := ktesting.NewTestContext(t)
 			policy, err := NewStaticPolicy(logger, topoSingleSocketHT, 1, tc.reservedCPUs, topologymanager.NewFakeManager(logger), tc.options)
 			if err != nil {
@@ -3680,18 +3814,41 @@ func TestStaticPolicyAdmissionRejectionType(t *testing.T) {
 			}
 			st := &mockState{
 				assignments:   state.ContainerCPUAssignments{},
+				baselines:     state.ContainerCPUBaselines{},
 				defaultCPUSet: tc.defaultCPUSet,
 			}
-			pod := makePod("fakePod", "fakeContainer", tc.request, tc.request)
-			res := admission.GetPodAdmitResult(policy.Allocate(logger, st, pod, &pod.Spec.Containers[0], lifecycle.AddOperation))
+			if tc.stAssignments != nil {
+				st.assignments = tc.stAssignments
+			}
+			if tc.stBaselines != nil {
+				st.baselines = tc.stBaselines
+			}
+			limit := tc.limit
+			if limit == "" {
+				limit = tc.request
+			}
+			pod := makePod("fakePod", "fakeContainer", tc.request, limit)
+			res := admission.GetPodAdmitResult(policy.Allocate(logger, st, pod, &pod.Spec.Containers[0], tc.operation))
+			if res.Admit != tc.expAdmit {
+				t.Fatalf("expected Admit=%v, got %+v", tc.expAdmit, res)
+			}
 			if res.Admit {
-				t.Fatalf("expected Admit=false, got %+v", res)
+				if tc.expAssignedCPUs > 0 {
+					cset, ok := st.GetCPUSet("fakePod", "fakeContainer")
+					if !ok || cset.Size() != tc.expAssignedCPUs {
+						t.Errorf("expected %d assigned CPUs, got %v (found=%v)", tc.expAssignedCPUs, cset, ok)
+					}
+				}
+				return
 			}
 			if res.Reason != tc.expReason {
 				t.Errorf("expected Reason=%q, got %q", tc.expReason, res.Reason)
 			}
 			if res.RejectionType != tc.expRejectionType {
 				t.Errorf("expected RejectionType=%v, got %v", tc.expRejectionType, res.RejectionType)
+			}
+			if !strings.Contains(res.Message, tc.expMessage) {
+				t.Errorf("expected Message to contain %q, got %q", tc.expMessage, res.Message)
 			}
 		})
 	}
