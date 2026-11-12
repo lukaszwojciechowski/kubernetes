@@ -67,22 +67,21 @@ func (s *containerScope) Admit(ctx context.Context, pod *v1.Pod, operation lifec
 			}
 			return admission.GetPodAdmitResult(&TopologyAffinityError{})
 		}
-		if dryRun {
-			// Without allocating, the hints of the next containers don't account for the
-			// resources this container would get, so a dry run may admit pods that can't be
-			// aligned.
-			continue
-		}
 		logger.Info("Topology Affinity", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name, "operation", operation)
+		// The hints are stored in dry run too, since the providers that allocate in dry run
+		// read them.
 		s.setTopologyHints(string(pod.UID), container.Name, bestHint)
 
-		err := s.allocateAlignedResources(ctx, pod, container, operation)
+		// In dry run, the hints of the next containers account only for the resources
+		// prepared by the providers that allocate in dry run, so a dry run may admit pods
+		// that the other providers can't align.
+		err := s.allocateAlignedResources(ctx, pod, container, operation, dryRun)
 		if err != nil {
 			metrics.TopologyManagerAdmissionErrorsTotal.Inc()
 			return admission.GetPodAdmitResult(err)
 		}
 
-		if IsAlignmentGuaranteed(s.policy) {
+		if !dryRun && IsAlignmentGuaranteed(s.policy) {
 			logger.V(4).Info("Resource alignment at container scope guaranteed", "pod", klog.KObj(pod))
 			metrics.ContainerAlignedComputeResources.WithLabelValues(metrics.AlignScopeContainer, metrics.AlignedNUMANode).Inc()
 		}

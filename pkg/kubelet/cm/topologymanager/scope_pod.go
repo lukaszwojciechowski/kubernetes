@@ -67,22 +67,21 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 	if !admit {
 		return admission.GetPodAdmitResult(NewTopologyAffinityError())
 	}
-	if dryRun {
-		return admission.GetPodAdmitResult(nil)
-	}
 
 	for container := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
 		logger.Info("Topology Affinity", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name)
 		s.setTopologyHints(string(pod.UID), container.Name, bestHint)
 
-		err := s.allocateAlignedResources(ctx, pod, container, operation)
+		err := s.allocateAlignedResources(ctx, pod, container, operation, dryRun)
 		if err != nil {
 			metrics.TopologyManagerAdmissionErrorsTotal.Inc()
 			return admission.GetPodAdmitResult(err)
 		}
 	}
 
-	s.updateSuccessMetrics(logger, pod)
+	if !dryRun {
+		s.updateSuccessMetrics(logger, pod)
+	}
 	return admission.GetPodAdmitResult(nil)
 }
 
@@ -92,9 +91,6 @@ func (s *podScope) admitUsingPodResources(ctx context.Context, pod *v1.Pod, oper
 	bestHint, admit := s.checkAffinity(logger, pod, operation)
 	if !admit {
 		return admission.GetPodAdmitResult(NewPodLevelTopologyAffinityError("pod with pod-level resources failed admission under pod-scope topology manager"))
-	}
-	if dryRun {
-		return admission.GetPodAdmitResult(nil)
 	}
 
 	// If the PodLevelResourceManagers feature is enabled, delegate the resource
@@ -108,14 +104,16 @@ func (s *podScope) admitUsingPodResources(ctx context.Context, pod *v1.Pod, oper
 		s.setTopologyHints(string(pod.UID), container.Name, bestHint)
 	}
 
-	err := s.allocatePodAlignedResources(logger, pod, operation)
+	err := s.allocatePodAlignedResources(logger, pod, operation, dryRun)
 	if err != nil {
 		logger.Error(err, "Pod-level allocation failed", "pod", klog.KObj(pod))
 		metrics.TopologyManagerAdmissionErrorsTotal.Inc()
 		return admission.GetPodAdmitResult(err)
 	}
 
-	s.updateSuccessMetrics(logger, pod)
+	if !dryRun {
+		s.updateSuccessMetrics(logger, pod)
+	}
 	return admission.GetPodAdmitResult(nil)
 }
 

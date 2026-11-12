@@ -43,8 +43,9 @@ type podTopologyHints map[string]map[string]TopologyHint
 type Scope interface {
 	Name() string
 	GetPolicy() Policy
-	// Admit calculates the topology affinity of the pod and, unless dryRun is set, stores the
-	// resulting hints and allocates the aligned resources.
+	// Admit calculates the topology affinity of the pod, stores the resulting hints and
+	// allocates the aligned resources. If dryRun is set, only the hint providers for which
+	// allocatesInDryRun holds allocate.
 	Admit(ctx context.Context, pod *v1.Pod, operation lifecycle.Operation, dryRun bool) lifecycle.PodAdmitResult
 	// AddHintProvider adds a hint provider to manager to indicate the hint provider
 	// wants to be consoluted with when making topology hints
@@ -143,11 +144,8 @@ func (s *scope) RemoveContainer(logger klog.Logger, containerID string) error {
 }
 
 func (s *scope) admitPolicyNone(ctx context.Context, pod *v1.Pod, operation lifecycle.Operation, dryRun bool) lifecycle.PodAdmitResult {
-	if dryRun {
-		return admission.GetPodAdmitResult(nil)
-	}
 	for container := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
-		err := s.allocateAlignedResources(ctx, pod, container, operation)
+		err := s.allocateAlignedResources(ctx, pod, container, operation, dryRun)
 		if err != nil {
 			return admission.GetPodAdmitResult(err)
 		}
@@ -155,10 +153,24 @@ func (s *scope) admitPolicyNone(ctx context.Context, pod *v1.Pod, operation life
 	return admission.GetPodAdmitResult(nil)
 }
 
+// allocatesInDryRun reports whether the hint provider allocates in a dry run. An
+// AdmitTransactionalHintProvider only prepares the allocation of an update, and a
+// dry run always ends with lifecycle.AdmitFailure, which discards it. Allocating
+// lets a dry run see the rejections that the provider finds only when allocating,
+// and, in the container scope, lets the hints of each container account for the
+// resources prepared for the previous ones. The other providers are skipped.
+func allocatesInDryRun(provider HintProvider, operation lifecycle.Operation) bool {
+	_, ok := provider.(AdmitTransactionalHintProvider)
+	return ok && operation == lifecycle.UpdateOperation
+}
+
 // It would be better to implement this function in topologymanager instead of scope
 // but topologymanager does not track providers anymore
-func (s *scope) allocateAlignedResources(ctx context.Context, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation) error {
+func (s *scope) allocateAlignedResources(ctx context.Context, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation, dryRun bool) error {
 	for _, provider := range s.hintProviders {
+		if dryRun && !allocatesInDryRun(provider, operation) {
+			continue
+		}
 		err := provider.Allocate(ctx, pod, container, operation)
 		if err != nil {
 			return err
@@ -167,8 +179,11 @@ func (s *scope) allocateAlignedResources(ctx context.Context, pod *v1.Pod, conta
 	return nil
 }
 
-func (s *scope) allocatePodAlignedResources(logger klog.Logger, pod *v1.Pod, operation lifecycle.Operation) error {
+func (s *scope) allocatePodAlignedResources(logger klog.Logger, pod *v1.Pod, operation lifecycle.Operation, dryRun bool) error {
 	for _, provider := range s.hintProviders {
+		if dryRun && !allocatesInDryRun(provider, operation) {
+			continue
+		}
 		err := provider.AllocatePod(logger, pod, operation)
 		if err != nil {
 			return err

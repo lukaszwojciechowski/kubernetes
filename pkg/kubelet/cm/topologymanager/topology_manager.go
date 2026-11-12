@@ -148,8 +148,10 @@ type AdmitTransactionalHintProvider interface {
 	// an inconsistency found here is an implementation bug, which the
 	// provider logs. On lifecycle.AdmitFailure, it must do nothing if nothing
 	// was prepared for the pod, also when the Topology Manager did not get
-	// the hints of the pod or did not call Allocate and AllocatePod for it,
-	// as in a dry run.
+	// the hints of the pod or did not call Allocate and AllocatePod for it.
+	// In a dry run of an update, the Topology Manager calls Allocate and
+	// AllocatePod as in a real admission; the dry run always ends with
+	// lifecycle.AdmitFailure.
 	CompleteAdmit(ctx context.Context, pod *v1.Pod, operation lifecycle.Operation, result lifecycle.AdmitResult)
 }
 
@@ -314,7 +316,7 @@ func (m *manager) Admit(ctx context.Context, attrs *lifecycle.PodAdmitAttributes
 
 	startTime := time.Now()
 	// In dry run, the hint providers still garbage collect the state of inactive pods when
-	// generating hints, but no hints are stored and no resources are allocated.
+	// generating hints, and only the providers for which allocatesInDryRun holds allocate.
 	podAdmitResult := m.scope.Admit(ctx, attrs.Pod, attrs.Operation, attrs.DryRun)
 	metrics.TopologyManagerAdmissionDuration.Observe(float64(time.Since(startTime).Milliseconds()))
 

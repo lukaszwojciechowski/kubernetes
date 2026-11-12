@@ -66,7 +66,7 @@ type resizeTransaction struct {
 
 // admissionStateLocked returns the state the policy allocates on while admitting the pod.
 // An update, such as a resize, gets the scratch state of its transaction, which is
-// started on first use. A dry run of the admission only computes hints on it, and
+// started on first use. A dry run of the admission also allocates on it, and
 // always ends with lifecycle.AdmitFailure, which drops it.
 // The caller must hold m.Mutex.
 func (m *manager) admissionStateLocked(logger klog.Logger, pod *v1.Pod, operation lifecycle.Operation) state.State {
