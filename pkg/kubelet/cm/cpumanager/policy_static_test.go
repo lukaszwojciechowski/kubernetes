@@ -5687,6 +5687,196 @@ func TestStaticPolicyPodResizeCPUsMultiContainerPod(t *testing.T) {
 	}
 }
 
+// TestStaticPolicyPodResizeReusableCPUs checks that a resized container takes over only the CPUs of
+// the non-restartable init containers of its pod that no other container of the pod uses. On resize
+// the topology manager calls Allocate for every container of the pod, init containers first.
+func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
+	type resizeStep struct {
+		containerName string
+		cpus          string
+		expErr        bool
+		// expCPUs is the expected allocation of the resized container, checked when not empty.
+		expCPUs cpuset.CPUSet
+	}
+	testCases := []struct {
+		description     string
+		pod             *v1.Pod
+		stAssignments   state.ContainerCPUAssignments
+		stBaselines     state.ContainerCPUBaselines
+		stDefaultCPUSet cpuset.CPUSet
+		// runTogether lists pairs of containers that run at the same time, so must never share CPUs.
+		runTogether [][2]string
+		steps       []resizeStep
+	}{
+		{
+			description: "Scale up of an app container does not take the CPUs of a sibling reusing init container CPUs",
+			pod: makeMultiContainerPodWithOptions(
+				[]*containerOptions{
+					{request: "4000m", limit: "4000m"},
+				},
+				[]*containerOptions{
+					{request: "2000m", limit: "2000m"},
+					{request: "2000m", limit: "2000m"},
+				},
+			),
+			stAssignments:   state.ContainerCPUAssignments{},
+			stBaselines:     state.ContainerCPUBaselines{},
+			stDefaultCPUSet: cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+			runTogether: [][2]string{
+				{"appContainer-0", "appContainer-1"},
+			},
+			steps: []resizeStep{
+				{containerName: "appContainer-0", cpus: "4000m"},
+			},
+		},
+		{
+			description: "Scale up of a restartable init container does not take the CPUs of an app container reusing init container CPUs",
+			pod: makeMultiContainerPodWithOptions(
+				[]*containerOptions{
+					{request: "4000m", limit: "4000m"},
+					{request: "2000m", limit: "2000m", restartPolicy: v1.ContainerRestartPolicyAlways},
+				},
+				[]*containerOptions{
+					{request: "2000m", limit: "2000m"},
+				},
+			),
+			stAssignments:   state.ContainerCPUAssignments{},
+			stBaselines:     state.ContainerCPUBaselines{},
+			stDefaultCPUSet: cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+			runTogether: [][2]string{
+				{"initContainer-1", "appContainer-0"},
+			},
+			steps: []resizeStep{
+				{containerName: "initContainer-1", cpus: "4000m"},
+			},
+		},
+		{
+			description: "Scale up of a restartable init container does not take the CPUs of a non-restartable init container that runs after it",
+			pod: makeMultiContainerPodWithOptions(
+				[]*containerOptions{
+					{request: "2000m", limit: "2000m", restartPolicy: v1.ContainerRestartPolicyAlways},
+					{request: "4000m", limit: "4000m"},
+				},
+				[]*containerOptions{
+					{request: "2000m", limit: "2000m"},
+				},
+			),
+			stAssignments:   state.ContainerCPUAssignments{},
+			stBaselines:     state.ContainerCPUBaselines{},
+			stDefaultCPUSet: cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+			runTogether: [][2]string{
+				{"initContainer-0", "initContainer-1"},
+				{"initContainer-0", "appContainer-0"},
+			},
+			steps: []resizeStep{
+				// Only 2 CPUs are left in the shared pool, the 2 CPUs of initContainer-1 not reused by
+				// appContainer-0 cannot be taken over.
+				{containerName: "initContainer-0", cpus: "6000m", expErr: true},
+				{containerName: "initContainer-0", cpus: "4000m"},
+			},
+		},
+		{
+			description: "Scale up takes over the init container CPUs no sibling uses, also after a scale down released them",
+			pod: makeMultiContainerPodWithOptions(
+				[]*containerOptions{
+					{request: "4000m", limit: "4000m"},
+				},
+				[]*containerOptions{
+					{request: "2000m", limit: "2000m"},
+				},
+			),
+			stAssignments: state.ContainerCPUAssignments{
+				"otherPod": {"otherContainer": cpuset.New(2, 3, 6, 7)},
+			},
+			stBaselines: state.ContainerCPUBaselines{
+				"otherPod": {"otherContainer": {Baseline: cpuset.New(2, 3, 6, 7)}},
+			},
+			stDefaultCPUSet: cpuset.New(0, 1, 4, 5),
+			// initContainer-0 terminates before appContainer-0 starts, so they may share CPUs.
+			runTogether: nil,
+			steps: []resizeStep{
+				// The shared pool is empty, only the CPUs of initContainer-0 can be used.
+				{containerName: "appContainer-0", cpus: "4000m", expCPUs: cpuset.New(0, 1, 4, 5)},
+				{containerName: "appContainer-0", cpus: "2000m"},
+				{containerName: "appContainer-0", cpus: "4000m", expCPUs: cpuset.New(0, 1, 4, 5)},
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.description, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.InPlacePodVerticalScalingExclusiveCPUs, true)
+			logger, _ := ktesting.NewTestContext(t)
+			policy, err := NewStaticPolicy(logger, topoSingleSocketHT, 0, cpuset.New(), topologymanager.NewFakeManager(logger), nil)
+			require.NoError(t, err)
+
+			st := &mockState{
+				assignments:   testCase.stAssignments,
+				baselines:     testCase.stBaselines,
+				defaultCPUSet: testCase.stDefaultCPUSet,
+			}
+			pod := testCase.pod
+			podUID := string(pod.UID)
+
+			for container := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
+				require.NoError(t, policy.Allocate(logger, st, pod, container, lifecycle.AddOperation), "Allocate() of container %s", container.Name)
+			}
+			checkCPUs := func(t *testing.T) {
+				t.Helper()
+				// Containers that run at the same time do not share CPUs.
+				for _, pair := range testCase.runTogether {
+					cpus0, _ := st.GetCPUSet(podUID, pair[0])
+					cpus1, _ := st.GetCPUSet(podUID, pair[1])
+					shared := cpus0.Intersection(cpus1)
+					require.True(t, shared.IsEmpty(), "containers %s (CPUs %s) and %s (CPUs %s) share CPUs %s", pair[0], cpus0, pair[1], cpus1, shared)
+				}
+
+				// Every CPU is either in the shared pool or assigned to a container, never in both.
+				assigned := cpuset.New()
+				for _, containers := range st.GetCPUAssignments() {
+					for _, cpus := range containers {
+						assigned = assigned.Union(cpus)
+					}
+				}
+				sharedPool := st.GetDefaultCPUSet()
+				require.True(t, sharedPool.Intersection(assigned).IsEmpty(), "shared pool %s contains assigned CPUs %s", sharedPool, assigned)
+				require.True(t, sharedPool.Union(assigned).Equals(topoSingleSocketHT.CPUDetails.CPUs()), "CPUs lost, shared pool %s, assigned CPUs %s", sharedPool, assigned)
+			}
+			checkCPUs(t)
+
+			for _, step := range testCase.steps {
+				resized := pod.DeepCopy()
+				for container := range podutil.ContainerIter(&resized.Spec, podutil.InitContainers|podutil.Containers) {
+					if container.Name == step.containerName {
+						container.Resources.Requests[v1.ResourceCPU] = resource.MustParse(step.cpus)
+						container.Resources.Limits[v1.ResourceCPU] = resource.MustParse(step.cpus)
+					}
+				}
+				// Like the topology manager, stop at the first container that fails.
+				var err error
+				for container := range podutil.ContainerIter(&resized.Spec, podutil.InitContainers|podutil.Containers) {
+					if err = policy.Allocate(logger, st, resized, container, lifecycle.UpdateOperation); err != nil {
+						break
+					}
+				}
+				if step.expErr {
+					require.Error(t, err, "resize of %s to %s: expected an error, assignments %v", step.containerName, step.cpus, st.GetCPUAssignments())
+				} else {
+					require.NoError(t, err, "resize of %s to %s", step.containerName, step.cpus)
+					pod = resized
+					cset, _ := st.GetCPUSet(podUID, step.containerName)
+					cpus := resource.MustParse(step.cpus)
+					require.Equal(t, int(cpus.Value()), cset.Size(), "resize of %s to %s, got CPUs %s", step.containerName, step.cpus, cset)
+					if !step.expCPUs.IsEmpty() {
+						require.True(t, step.expCPUs.Equals(cset), "resize of %s to %s: expected CPUs %s, got %s", step.containerName, step.cpus, step.expCPUs, cset)
+					}
+				}
+				checkCPUs(t)
+			}
+		})
+	}
+}
+
 func TestStaticPolicyRemoveAlognsideInPlacePodVerticalScalingExclusiveCPUs(t *testing.T) {
 
 	testCases := []staticPolicyTest{

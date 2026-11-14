@@ -930,6 +930,10 @@ func TestGetTopologyHintsForResize(t *testing.T) {
 	m1101, _ := bitmask.NewBitMask(0, 2, 3)
 	m1111, _ := bitmask.NewBitMask(0, 1, 2, 3)
 
+	// topoDualSocketHT: 2 sockets, 2 numa, 6 cores, 12 CPUs with HT (NUMA0: even CPUs, NUMA1: odd CPUs)
+	d01, _ := bitmask.NewBitMask(0)
+	d11, _ := bitmask.NewBitMask(0, 1)
+
 	testCases := []struct {
 		description   string
 		pod           *v1.Pod
@@ -1097,6 +1101,60 @@ func TestGetTopologyHintsForResize(t *testing.T) {
 				{NUMANodeAffinity: m1111, Preferred: false, Score: 18},
 			},
 			topology: topoDualSocketMultiNumaPerSocketHT,
+		},
+		// All the CPUs of initContainer-0 are reused by the app containers, so none of them is
+		// reusable on scale up. cpusToReuse holds what the policy has recorded once Allocate of
+		// initContainer-0 ran during the resize: it must not make the CPUs of appContainer-1 on
+		// NUMA1 count as reusable, which would drop the NUMA0 hint.
+		{
+			description: "Scale-up container 2->4, init container CPUs are reused by the app containers",
+			pod: makeMultiContainerPodWithOptions([]*containerOptions{
+				{request: "4", limit: "4"},
+			}, []*containerOptions{
+				{request: "4", limit: "4"},
+				{request: "2", limit: "2"},
+			}),
+			assignments: state.ContainerCPUAssignments{"podUID": {
+				"initContainer-0": mustParseCPUSet(t, "0,1,6,7"),
+				"appContainer-0":  mustParseCPUSet(t, "0,6"),
+				"appContainer-1":  mustParseCPUSet(t, "1,7"),
+			}},
+			baselines: state.ContainerCPUBaselines{"podUID": {
+				"initContainer-0": {Baseline: mustParseCPUSet(t, "0,1,6,7")},
+				"appContainer-0":  {Baseline: mustParseCPUSet(t, "0,6")},
+				"appContainer-1":  {Baseline: mustParseCPUSet(t, "1,7")},
+			}},
+			defaultCPUSet: mustParseCPUSet(t, "2-5,8-11"),
+			cpusToReuse:   map[string]cpuset.CPUSet{"podUID": mustParseCPUSet(t, "0,1,6,7")},
+			expectedHints: []topologymanager.TopologyHint{
+				{NUMANodeAffinity: d01, Preferred: true, Score: 33},
+				{NUMANodeAffinity: d11, Preferred: false, Score: 33},
+			},
+			topology: topoDualSocketHT,
+		},
+		// The CPUs of initContainer-0 not used by appContainer-0 are on NUMA1, so reusing them
+		// requires both NUMA nodes. They are reusable also when cpusToReuse is empty, e.g. after
+		// a kubelet restart.
+		{
+			description: "Scale-up container 2->4, unused init container CPUs are reusable",
+			pod: makeMultiContainerPodWithOptions([]*containerOptions{
+				{request: "4", limit: "4"},
+			}, []*containerOptions{
+				{request: "4", limit: "4"},
+			}),
+			assignments: state.ContainerCPUAssignments{"podUID": {
+				"initContainer-0": mustParseCPUSet(t, "0,1,6,7"),
+				"appContainer-0":  mustParseCPUSet(t, "0,6"),
+			}},
+			baselines: state.ContainerCPUBaselines{"podUID": {
+				"initContainer-0": {Baseline: mustParseCPUSet(t, "0,1,6,7")},
+				"appContainer-0":  {Baseline: mustParseCPUSet(t, "0,6")},
+			}},
+			defaultCPUSet: mustParseCPUSet(t, "2-5,8-11"),
+			expectedHints: []topologymanager.TopologyHint{
+				{NUMANodeAffinity: d11, Preferred: false, Score: 33},
+			},
+			topology: topoDualSocketHT,
 		},
 	}
 

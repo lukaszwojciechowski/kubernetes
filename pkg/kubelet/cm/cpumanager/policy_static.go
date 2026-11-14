@@ -1056,7 +1056,6 @@ func (p *staticPolicy) allocateForResize(logger klog.Logger, s state.State, pod 
 	// Allocate for every container on every resize attempt, so return before
 	// touching the counters: they track allocations, not admission attempts.
 	if resizeFeasibility.requestedCPUsByPodContainer == resizeFeasibility.cpusInUseByPodContainer.Size() {
-		p.updateCPUsToReuse(pod, container, resizeFeasibility.cpusInUseByPodContainer)
 		logger.V(4).Info("Static policy: exclusive CPUs unchanged, skipping resize allocation", "cpuset", resizeFeasibility.cpusInUseByPodContainer.String())
 		return nil
 	}
@@ -1088,7 +1087,7 @@ func (p *staticPolicy) allocateForResize(logger klog.Logger, s state.State, pod 
 	logger.Info("Topology Affinity", "affinity", hint)
 	// Attempt new allocation ( reusing allocated CPUs ) according to the NUMA affinity contained in the hint
 	// Since NUMA affinity container in the hint is unmutable already allocated CPUs pass the criteria
-	newallocatedcpuset, witherr := p.allocateCPUsForResize(logger, s, resizeFeasibility.requestedCPUsByPodContainer, hint.NUMANodeAffinity, p.cpusToReuse[string(pod.UID)], resizeFeasibility.cpusInUseByPodContainer, resizeFeasibility.baselineCPUs)
+	newallocatedcpuset, witherr := p.allocateCPUsForResize(logger, s, resizeFeasibility.requestedCPUsByPodContainer, hint.NUMANodeAffinity, getReusableCPUsForResize(s, pod, container), resizeFeasibility.cpusInUseByPodContainer, resizeFeasibility.baselineCPUs)
 	if witherr != nil {
 		err := resizeAllocateCPUsError{
 			PodUID:        string(pod.UID),
@@ -1110,7 +1109,6 @@ func (p *staticPolicy) allocateForResize(logger klog.Logger, s state.State, pod 
 		cpusToRelease := resizeFeasibility.cpusInUseByPodContainer.Difference(newallocatedcpuset.CPUs).Difference(getAssignedCPUsOfSiblings(s, string(pod.UID), container.Name))
 		s.SetDefaultCPUSet(s.GetDefaultCPUSet().Union(cpusToRelease))
 	}
-	p.updateCPUsToReuse(pod, container, newallocatedcpuset.CPUs)
 	p.updateMetricsOnAllocate(logger, s, newallocatedcpuset)
 	metrics.ResourceManagerAllocationsTotal.WithLabelValues(metrics.ResourceManagerCPU, metrics.ResourceManagerNode).Inc()
 	metrics.ResourceManagerContainerAssignments.WithLabelValues(metrics.ResourceManagerCPU, metrics.ResourceManagerExclusiveNode).Inc()
@@ -1135,6 +1133,36 @@ func getAssignedCPUsOfSiblings(s state.State, podUID string, containerName strin
 		cset = cset.Union(cpus)
 	}
 	return cset
+}
+
+// getReusableCPUsForResize returns the CPUs the given container may take over on resize: the CPUs
+// of the non-restartable init containers of the pod that run before the container (all of them
+// for an app container), minus the CPUs of any other container of the pod.
+//
+// p.cpusToReuse is not used on resize: it is rebuilt container by container while the topology
+// manager admits the pod, and during a resize every container is already allocated, so it still
+// holds the CPUs of the containers not visited yet.
+func getReusableCPUsForResize(s state.State, pod *v1.Pod, container *v1.Container) cpuset.CPUSet {
+	podUID := string(pod.UID)
+	reusable := cpuset.New()
+	inUse := cpuset.New()
+	runsBefore := true
+	for c, containerType := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
+		if c.Name == container.Name {
+			runsBefore = false
+			continue
+		}
+		cset, exists := s.GetCPUSet(podUID, c.Name)
+		if !exists {
+			continue
+		}
+		if runsBefore && containerType == podutil.InitContainers && !podutil.IsRestartableInitContainer(c) {
+			reusable = reusable.Union(cset)
+		} else {
+			inUse = inUse.Union(cset)
+		}
+	}
+	return reusable.Difference(inUse)
 }
 
 func (p *staticPolicy) RemoveContainer(logger klog.Logger, s state.State, podUID string, containerName string) error {
@@ -1656,6 +1684,7 @@ func (p *staticPolicy) getPodTopologyHintsForResize(logger klog.Logger, s state.
 	retainedCPUsByPod := cpuset.New()
 	freeCPUs := cpuset.New()
 	hasContainerResize := false
+	var resizedContainer *v1.Container
 	for container := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
 		logger_ := klog.LoggerWithValues(logger, "containerName", container.Name)
 
@@ -1676,6 +1705,7 @@ func (p *staticPolicy) getPodTopologyHintsForResize(logger klog.Logger, s state.
 					return nil
 				}
 				hasContainerResize = true
+				resizedContainer = container
 				if cpusInUseByPodContainer.Size() > requestedCPUsByPodContainer { // scale down
 					baselineCPUsByPodContainer, _ := s.GetBaselineCPUSet(string(pod.UID), container.Name)
 					retainedCPUsByPod = retainedCPUsByPod.Union(baselineCPUsByPodContainer)
@@ -1700,8 +1730,7 @@ func (p *staticPolicy) getPodTopologyHintsForResize(logger klog.Logger, s state.
 	}
 
 	// Get a list of reusable CPUs (e.g. CPUs reused from initContainers).
-	// It should be an empty CPUSet for a newly created pod.
-	reusableCPUsByPod := p.cpusToReuse[string(pod.UID)]
+	reusableCPUsByPod := getReusableCPUsForResize(s, pod, resizedContainer)
 
 	// Ensure any CPUs already retained CPUs to containers in this pod are included as part of the hint generation.
 	reusableCPUsByPod = reusableCPUsByPod.Union(retainedCPUsByPod)
@@ -2236,8 +2265,7 @@ func (p *staticPolicy) getTopologyHintsForResize(logger klog.Logger, s state.Sta
 	}
 
 	// Get a list of reusable CPUs (e.g. CPUs reused from initContainers).
-	// It should be an empty CPUSet for a newly created pod.
-	reusable := retained.Union(p.cpusToReuse[string(pod.UID)])
+	reusable := retained.Union(getReusableCPUsForResize(s, pod, container))
 
 	// Generate hints. Outside of regeneration the usable CPUs are exactly the
 	// free ones, so the same set drives both feasibility and the Score.
