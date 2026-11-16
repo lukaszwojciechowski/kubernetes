@@ -1341,6 +1341,37 @@ func TestGetPodTopologyHintsForResize(t *testing.T) {
 			},
 			topology: topoDualSocketHT,
 		},
+		{
+			description: "One container scales down from 7 to 6, CPUs of the terminated init container taken on a previous scale up are not counted twice",
+			pod: makeMultiContainerPodWithOptions(
+				[]*containerOptions{{request: "5", limit: "5"}},
+				[]*containerOptions{{request: "6", limit: "6"}},
+			),
+			assignments: state.ContainerCPUAssignments{
+				"podUID": {
+					"initContainer-0": mustParseCPUSet(t, "0,2,4,6,8"),
+					"appContainer-0":  mustParseCPUSet(t, "0-4,6,8"),
+				},
+				"otherPodUID": {
+					"appContainer-0": mustParseCPUSet(t, "10"),
+				},
+			},
+			baselines: state.ContainerCPUBaselines{
+				"podUID": {
+					"initContainer-0": {Baseline: mustParseCPUSet(t, "0,2,4,6,8")},
+					"appContainer-0":  {Baseline: mustParseCPUSet(t, "0")},
+				},
+				"otherPodUID": {
+					"appContainer-0": {Baseline: mustParseCPUSet(t, "10")},
+				},
+			},
+			defaultCPUSet: mustParseCPUSet(t, "5,7,9,11"),
+			// Only 5 CPUs of the container are on NUMA0, so NUMA0 alone can't satisfy the request.
+			expectedHints: []topologymanager.TopologyHint{
+				{NUMANodeAffinity: d11, Preferred: false, Score: 50},
+			},
+			topology: topoDualSocketHT,
+		},
 	}
 
 	for _, tc := range testCases {

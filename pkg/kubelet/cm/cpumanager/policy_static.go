@@ -1682,7 +1682,7 @@ func (p *staticPolicy) getPodTopologyHintsForResize(logger klog.Logger, s state.
 	}
 
 	availableCPUs := cpuset.New()
-	// It should be an empty CPUSet for a newly created pod.
+	// CPUs reusable by the scaling up container, empty on scale down.
 	reusableCPUsByPod := cpuset.New()
 	retainedCPUsByPod := cpuset.New()
 	freeCPUs := cpuset.New()
@@ -1707,14 +1707,14 @@ func (p *staticPolicy) getPodTopologyHintsForResize(logger klog.Logger, s state.
 					return nil
 				}
 				hasContainerResize = true
-				// Get a list of reusable CPUs (e.g. CPUs reused from initContainers).
-				reusableCPUsByPod = getReusableCPUsForResizeByPodContainer(s, pod, container)
 				if cpusInUseByPodContainer.Size() > requestedCPUsByPodContainer { // scale down
 					baselineCPUsByPodContainer, _ := s.GetBaselineCPUSet(string(pod.UID), container.Name)
 					retainedCPUsByPod = retainedCPUsByPod.Union(baselineCPUsByPodContainer)
 					freeCPUs = p.GetAvailableCPUs(s).Union(cpusInUseByPodContainer.Difference(baselineCPUsByPodContainer))
 					availableCPUs = availableCPUs.Union(cpusInUseByPodContainer.Difference(baselineCPUsByPodContainer))
 				} else { // scale up
+					// Get a list of reusable CPUs (e.g. CPUs reused from initContainers).
+					reusableCPUsByPod = getReusableCPUsForResizeByPodContainer(s, pod, container)
 					retainedCPUsByPod = retainedCPUsByPod.Union(cpusInUseByPodContainer)
 					availableCPUs = p.GetAvailableCPUs(s)
 					freeCPUs = availableCPUs
@@ -1734,6 +1734,11 @@ func (p *staticPolicy) getPodTopologyHintsForResize(logger klog.Logger, s state.
 
 	// Ensure any CPUs already retained CPUs to containers in this pod are included as part of the hint generation.
 	reusableCPUsByPod = reusableCPUsByPod.Union(retainedCPUsByPod)
+	// On scale down the CPUs released by the container may still be assigned to a sibling,
+	// e.g. CPUs of a terminated non-restartable init container taken on a previous scale up.
+	// They are already counted as reusable, so keep them out of the available and free CPUs.
+	availableCPUs = availableCPUs.Difference(reusableCPUsByPod)
+	freeCPUs = freeCPUs.Difference(reusableCPUsByPod)
 
 	// Generate hints. Outside of regeneration the usable CPUs are exactly the
 	// free ones, so the same set drives both feasibility and the Score.
