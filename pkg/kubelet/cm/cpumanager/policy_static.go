@@ -1988,175 +1988,7 @@ func (p *staticPolicy) checkResizeFeasibility(logger klog.Logger, s state.State,
 		}
 	}
 
-	cpusInUseByPodContainer, assignedExist := s.GetCPUSet(string(pod.UID), container.Name)
-	baselineCPUs, baselineExist := s.GetBaselineCPUSet(string(pod.UID), container.Name)
-	podIsUsingPodLevelResources := resourcehelper.IsPodLevelResourcesSet(pod)
-
-	if podIsUsingPodLevelResources {
-
-		if !utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {
-			logger.V(2).Info("CPU Manager container-level resource allocation skipped, pod is using pod-level resources, PodLevelResourceManagers feature gate is not enabled")
-			return resizeFeasibility{
-				requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-				cpusInUseByPodContainer:     cpuset.New(),
-				baselineCPUs:                cpuset.New(),
-				skipResize:                  true,
-				err:                         nil,
-			}
-		}
-
-		if requestedCPUsByPodContainer != cpusInUseByPodContainer.Size() {
-			if !assignedExist {
-				if baselineExist {
-					return resizeFeasibility{
-						requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-						cpusInUseByPodContainer:     cpuset.New(),
-						baselineCPUs:                cpuset.New(),
-						skipResize:                  true,
-						err: isResizeFeasibleError{
-							PodUID:        string(pod.UID),
-							ContainerName: container.Name,
-							CausedBy:      "inconsistent recorded state, pod is using pod-level resources, baseline cpus exist while assigned is missing",
-						},
-					}
-				}
-
-				if inExclusiveCPUPool(requestedCPUsQuantity) {
-					return resizeFeasibility{
-						requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-						cpusInUseByPodContainer:     cpuset.New(),
-						baselineCPUs:                cpuset.New(),
-						skipResize:                  true,
-						err: isResizeFeasibleError{
-							PodUID:        string(pod.UID),
-							ContainerName: container.Name,
-							CausedBy:      "pod is using pod-level resources, cannot move container from shared to exclusive pool, (requested CPUs = " + requestedCPUsQuantity.String() + ")",
-						},
-					}
-				}
-
-				logger.V(2).Info("CPU Manager container-level resource allocation skipped, pod is using pod-level resources with shared pool CPUs or recorded state is inconsistent")
-				return resizeFeasibility{
-					requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-					cpusInUseByPodContainer:     cpuset.New(),
-					baselineCPUs:                cpuset.New(),
-					skipResize:                  true,
-					err:                         nil,
-				}
-			}
-
-			if !baselineExist {
-				return resizeFeasibility{
-					requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-					cpusInUseByPodContainer:     cpuset.New(),
-					baselineCPUs:                cpuset.New(),
-					skipResize:                  true,
-					err: isResizeFeasibleError{
-						PodUID:        string(pod.UID),
-						ContainerName: container.Name,
-						CausedBy:      "inconsistent recorded state, pod is using pod-level resources, recorded baseline CPUs are missing but assigned CPUs exist",
-					},
-				}
-			}
-
-			if cpusInUseByPodContainer.IsEmpty() {
-				return resizeFeasibility{
-					requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-					cpusInUseByPodContainer:     cpuset.New(),
-					baselineCPUs:                cpuset.New(),
-					skipResize:                  true,
-					err: isResizeFeasibleError{
-						PodUID:        string(pod.UID),
-						ContainerName: container.Name,
-						CausedBy:      "inconsistent recorded state, pod is using pod-level resources, assigned CPUs are empty",
-					},
-				}
-			}
-
-			if baselineCPUs.IsEmpty() {
-				return resizeFeasibility{
-					requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-					cpusInUseByPodContainer:     cpuset.New(),
-					baselineCPUs:                cpuset.New(),
-					skipResize:                  true,
-					err: isResizeFeasibleError{
-						PodUID:        string(pod.UID),
-						ContainerName: container.Name,
-						CausedBy:      "inconsistent recorded state, pod is using pod-level resources, baseline CPUs are empty while assigned CPUs exist",
-					},
-				}
-			}
-
-			if cpusInUseByPodContainer.Size() < baselineCPUs.Size() {
-				return resizeFeasibility{
-					requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-					cpusInUseByPodContainer:     cpuset.New(),
-					baselineCPUs:                cpuset.New(),
-					skipResize:                  true,
-					err: isResizeFeasibleError{
-						PodUID:        string(pod.UID),
-						ContainerName: container.Name,
-						CausedBy:      "inconsistent recorded state, pod is using pod-level resources, baseline CPUs are more than assigned CPUs",
-					},
-				}
-			}
-
-			if !baselineCPUs.IsSubsetOf(cpusInUseByPodContainer) {
-				return resizeFeasibility{
-					requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-					cpusInUseByPodContainer:     cpuset.New(),
-					baselineCPUs:                cpuset.New(),
-					skipResize:                  true,
-					err: isResizeFeasibleError{
-						PodUID:        string(pod.UID),
-						ContainerName: container.Name,
-						CausedBy:      "inconsistent recorded state, pod is using pod-level resources, baseline CPUs are not a subset of assigned CPUs",
-					},
-				}
-			}
-
-			baselineCPUsQuantity := baselineCPUs.Size()
-			if requestedCPUsByPodContainer < baselineCPUsQuantity {
-				return resizeFeasibility{
-					requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-					cpusInUseByPodContainer:     cpuset.New(),
-					baselineCPUs:                cpuset.New(),
-					skipResize:                  true,
-					err: isResizeFeasibleError{
-						PodUID:        string(pod.UID),
-						ContainerName: container.Name,
-						CausedBy:      "not allowed to reduce container in pod using pod-level resources, exclusively allocated pool below baseline, (baseline CPUs = " + strconv.Itoa(baselineCPUsQuantity) + ", requested CPUs = " + strconv.Itoa(requestedCPUsByPodContainer) + ")",
-					},
-				}
-			}
-
-			if !inExclusiveCPUPool(requestedCPUsQuantity) {
-				return resizeFeasibility{
-					requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-					cpusInUseByPodContainer:     cpuset.New(),
-					baselineCPUs:                cpuset.New(),
-					skipResize:                  true,
-					err: isResizeFeasibleError{
-						PodUID:        string(pod.UID),
-						ContainerName: container.Name,
-						CausedBy:      "cannot move container in pod using pod-level resources, from exclusive to shared pool, (requested CPUs = " + requestedCPUsQuantity.String() + ")",
-					},
-				}
-			}
-
-			return resizeFeasibility{
-				requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-				cpusInUseByPodContainer:     cpuset.New(),
-				baselineCPUs:                cpuset.New(),
-				skipResize:                  true,
-				err: isResizeFeasibleError{
-					PodUID:        string(pod.UID),
-					ContainerName: container.Name,
-					CausedBy:      "not allowed to resize container, pod is using pod-level resources with exclusively allocated pool, (requestedCPUs = " + requestedCPUsQuantity.String() + ", assignedCPUs = " + cpusInUseByPodContainer.String() + ")",
-				},
-			}
-		}
-
+	if resourcehelper.IsPodLevelResourcesSet(pod) {
 		logger.V(2).Info("CPU Manager container-level resource allocation skipped, pod is using pod-level resources")
 		return resizeFeasibility{
 			requestedCPUsByPodContainer: requestedCPUsByPodContainer,
@@ -2179,8 +2011,10 @@ func (p *staticPolicy) checkResizeFeasibility(logger klog.Logger, s state.State,
 		}
 	}
 
+	cpusInUseByPodContainer, assignedExist := s.GetCPUSet(string(pod.UID), container.Name)
 	if !assignedExist {
 
+		_, baselineExist := s.GetBaselineCPUSet(string(pod.UID), container.Name)
 		if baselineExist {
 			return resizeFeasibility{
 				requestedCPUsByPodContainer: requestedCPUsByPodContainer,
@@ -2240,6 +2074,7 @@ func (p *staticPolicy) checkResizeFeasibility(logger klog.Logger, s state.State,
 		}
 	}
 
+	baselineCPUs, baselineExist := s.GetBaselineCPUSet(string(pod.UID), container.Name)
 	if !baselineExist {
 		return resizeFeasibility{
 			requestedCPUsByPodContainer: requestedCPUsByPodContainer,
