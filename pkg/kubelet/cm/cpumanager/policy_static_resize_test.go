@@ -2040,6 +2040,9 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 		expErr        bool
 		// expCPUs is the expected allocation of the resized container, checked when not empty.
 		expCPUs cpuset.CPUSet
+		// expSkipped is whether the policy is expected to skip the resize, which keeps the
+		// allocation of the resized container.
+		expSkipped bool
 	}
 	testCases := []struct {
 		description     string
@@ -2053,8 +2056,10 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 		podLevelResourcesEnabled        bool
 		podLevelResourceManagersEnabled bool
 	}{
+		// The policy skips the resizes of pods with pod-level resources. The resizes that would
+		// change the exclusive CPUs of such a pod are rejected by the resize admit handler.
 		{
-			description:     "Resize of container with shared CPUs resulting to exclusive CPUs in a pod with pod-level resources should be rejected",
+			description:     "Resize of container with shared CPUs resulting to exclusive CPUs in a pod with pod-level resources should be skipped",
 			pod:             makePodWithPodLevelResources("pod1", "8", "8", "appContainer-0", "1500m", "1500m"),
 			stAssignments:   state.ContainerCPUAssignments{},
 			stBaselines:     state.ContainerCPUBaselines{},
@@ -2063,13 +2068,13 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 				{"appContainer-0"},
 			},
 			steps: []resizeStep{
-				{containerName: "appContainer-0", cpus: "2000m", expErr: true},
+				{containerName: "appContainer-0", cpus: "2000m", expSkipped: true},
 			},
 			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 		},
 		{
-			description:     "Resize of exclusive CPUs in a pod with pod-level resources should be rejected",
+			description:     "Resize of exclusive CPUs in a pod with pod-level resources should be skipped",
 			pod:             makePodWithPodLevelResources("pod1", "8", "8", "appContainer-0", "4", "4"),
 			stAssignments:   state.ContainerCPUAssignments{},
 			stBaselines:     state.ContainerCPUBaselines{},
@@ -2078,7 +2083,7 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 				{"appContainer-0"},
 			},
 			steps: []resizeStep{
-				{containerName: "appContainer-0", cpus: "6000m", expErr: true},
+				{containerName: "appContainer-0", cpus: "6000m", expSkipped: true},
 			},
 			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
@@ -2244,6 +2249,7 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 						container.Resources.Limits[v1.ResourceCPU] = resource.MustParse(step.cpus)
 					}
 				}
+				csetBefore, _ := st.GetCPUSet(podUID, step.containerName)
 				// Like the topology manager, stop at the first container that fails.
 				var err error
 				for container := range podutil.ContainerIter(&resized.Spec, podutil.InitContainers|podutil.Containers) {
@@ -2253,6 +2259,11 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 				}
 				if step.expErr {
 					require.Error(t, err, "resize of %s to %s: expected an error, assignments %v", step.containerName, step.cpus, st.GetCPUAssignments())
+				} else if step.expSkipped {
+					require.NoError(t, err, "resize of %s to %s", step.containerName, step.cpus)
+					pod = resized
+					cset, _ := st.GetCPUSet(podUID, step.containerName)
+					require.True(t, csetBefore.Equals(cset), "resize of %s to %s: expected to keep CPUs %s, got %s", step.containerName, step.cpus, csetBefore, cset)
 				} else {
 					require.NoError(t, err, "resize of %s to %s", step.containerName, step.cpus)
 					pod = resized
