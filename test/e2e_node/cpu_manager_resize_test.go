@@ -48,10 +48,24 @@ import (
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 )
 
+// recordedState is the CPU set of a container seen by the test, and the one seen when the pod was created.
 type recordedState struct {
 	assignedCPUs cpuset.CPUSet
 	baselineCPUs cpuset.CPUSet
 }
+
+// resizeCheckEnv holds what the CPU set checks need besides the containers to check.
+type resizeCheckEnv struct {
+	f       *framework.Framework
+	testPod *v1.Pod
+	// sharedPoolPod is a best-effort pod, its container runs on the shared CPU pool.
+	sharedPoolPod *v1.Pod
+	reservedCPUs  cpuset.CPUSet
+	// singleNUMANode requires the CPUs of each running container on a single NUMA node.
+	singleNUMANode bool
+}
+
+const sharedPoolContainerName = "shared-pool-container"
 
 type containerCPUInfo struct {
 	Name       string
@@ -67,6 +81,8 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 	// original kubeletconfig before the context start, to be restored
 	var oldCfg *kubeletconfig.KubeletConfiguration
 	var reservedCPUs cpuset.CPUSet
+	// set by the contexts whose topology manager policy is single-numa-node
+	var singleNUMANode bool
 	var onlineCPUs cpuset.CPUSet
 	var smtLevel int
 	var uncoreGroupSize int
@@ -126,6 +142,7 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 	ginkgo.BeforeEach(func(ctx context.Context) {
 		// note intentionally NOT set reservedCPUs -  this must be initialized on a test-by-test basis
 		reservedCPUs = cpuset.New()
+		singleNUMANode = false
 		podMap = make(map[string]*v1.Pod)
 		createPodSync = func(ctx context.Context, pod *v1.Pod) *v1.Pod {
 			newPod := e2epod.NewPodClient(f).CreateSync(ctx, pod)
@@ -178,17 +195,33 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 			skipIfPatchFitsAllocatable(node, desiredContainersFirstPatch, wantPatchErrorFirstPatch)
 			skipIfPatchFitsAllocatable(node, desiredContainersSecondPatch, wantPatchErrorSecondPatch)
 
+			ginkgo.By("creating a best-effort pod running on the shared CPU pool")
+			sharedPoolPod := createPodSync(ctx, makeCPUManagerBEPod("shared-pool-pod", []ctnAttribute{
+				{
+					ctnName:    sharedPoolContainerName,
+					ctnCommand: "sleep 1d",
+				},
+			}))
+
 			testPod1 := podresize.MakePodWithResizableContainers(f.Namespace.Name, "testpod1", strconv.Itoa(time.Now().Nanosecond()), baselineContainers, nil)
 			testPod1 = e2epod.MustMixinRestrictedPodSecurity(testPod1)
 			ginkgo.By("creating test pod 1 with multiple containers")
 			testPod1 = createPodSync(ctx, testPod1)
 			podClient := e2epod.PodClientNS(f, testPod1.Namespace)
 
+			checkEnv := resizeCheckEnv{
+				f:              f,
+				testPod:        testPod1,
+				sharedPoolPod:  sharedPoolPod,
+				reservedCPUs:   reservedCPUs,
+				singleNUMANode: singleNUMANode,
+			}
+
 			ginkgo.By("verifying baseline pod resources, allocations and policy are as expected")
 			podresize.VerifyPodResources(testPod1, baselineContainers, nil)
 
 			ginkgo.By("verifying baseline pod cpusets are as expected")
-			stateBeforeResize := checkAllocatedCPUsForResize(ctx, f, nil, baselineCpuInfo, testPod1)
+			stateBeforeResize := checkAllocatedCPUsForResize(ctx, checkEnv, nil, baselineCpuInfo)
 
 			cpuCapAfterPodCreate, cpuAllocAfterPodCreate, _ := getLocalNodeCPUDetails(ctx, f)
 			framework.Logf("Node '%s': NodeAllocatableCPUs = %d, currently available to allocate = %d.",
@@ -205,7 +238,7 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 				gomega.Expect(pErr).To(gomega.MatchError(gomega.MatchRegexp(wantPatchErrorFirstPatch)))
 
 				ginkgo.By("verifying pod cpusets after first non patched resize")
-				checkAllocatedCPUsForResize(ctx, f, stateBeforeResize, expectedCpuInfoFirstPatch, testPod1)
+				checkAllocatedCPUsForResize(ctx, checkEnv, stateBeforeResize, expectedCpuInfoFirstPatch)
 				return
 			}
 
@@ -222,7 +255,7 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 				gomega.Expect(infeasibleResizePod).To(HaveStatusConditionsMatchingRegex(wantActuationErrorFirstPatch))
 
 				ginkgo.By("verifying pod cpusets after infeasible resize, are as expected")
-				checkAllocatedCPUsForResize(ctx, f, stateBeforeResize, expectedCpuInfoFirstPatch, testPod1)
+				checkAllocatedCPUsForResize(ctx, checkEnv, stateBeforeResize, expectedCpuInfoFirstPatch)
 				return
 			}
 
@@ -237,7 +270,7 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 			podresize.VerifyPodResources(resizedPod, expected, nil)
 
 			ginkgo.By("verifying pod in use cpusets after first resize are as expected")
-			stateAfterFirstResize := checkAllocatedCPUsForResize(ctx, f, stateBeforeResize, expectedCpuInfoFirstPatch, testPod1)
+			stateAfterFirstResize := checkAllocatedCPUsForResize(ctx, checkEnv, stateBeforeResize, expectedCpuInfoFirstPatch)
 
 			cpuCapAfterFirstPatch, cpuAllocAfterFirstPatch, _ := getLocalNodeCPUDetails(ctx, f)
 			framework.Logf("Node '%s': NodeAllocatableCPUs = %d, currently available to allocate = %d.",
@@ -258,7 +291,7 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 				gomega.Expect(pErr).To(gomega.MatchError(gomega.MatchRegexp(wantPatchErrorSecondPatch)))
 
 				ginkgo.By("verifying pod cpusets after second non patched resize")
-				checkAllocatedCPUsForResize(ctx, f, stateAfterFirstResize, expectedCpuInfoSecondPatch, testPod1)
+				checkAllocatedCPUsForResize(ctx, checkEnv, stateAfterFirstResize, expectedCpuInfoSecondPatch)
 				return
 			}
 
@@ -276,7 +309,7 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 				gomega.Expect(infeasibleResizePod).To(HaveStatusConditionsMatchingRegex(wantActuationErrorSecondPatch))
 
 				ginkgo.By("verifying pod in use cpusets, after infeasible second resize, are as expected")
-				checkAllocatedCPUsForResize(ctx, f, stateAfterFirstResize, expectedCpuInfoSecondPatch, testPod1)
+				checkAllocatedCPUsForResize(ctx, checkEnv, stateAfterFirstResize, expectedCpuInfoSecondPatch)
 				return
 			}
 
@@ -295,7 +328,7 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 			podresize.VerifyPodResources(resizedPod, expected, nil)
 
 			ginkgo.By("verifying pod cpusets after second actuated resize")
-			checkAllocatedCPUsForResize(ctx, f, stateAfterFirstResize, expectedCpuInfoSecondPatch, testPod1)
+			checkAllocatedCPUsForResize(ctx, checkEnv, stateAfterFirstResize, expectedCpuInfoSecondPatch)
 		}
 	})
 
@@ -1333,6 +1366,7 @@ var _ = SIGDescribe("CPU Manager with InPlacePodVerticalScalingExclusiveCPUs ena
 	ginkgo.When("topology manager policy option is set to single-numa-node, resizing a Guaranteed multiple container pod, with integer CPU request", ginkgo.Label("guaranteed multiple containers pod with integer CPU requests resize", "exclusive-cpus"), func() {
 		ginkgo.BeforeEach(func(ctx context.Context) {
 			reservedCPUs = cpuset.New(0)
+			singleNUMANode = true
 		})
 		smtLevel = smtLevelFromSysFS() // this should not change at all, at least during this suite lifetime
 		framework.Logf("SMT level: %d", smtLevel)
@@ -1996,79 +2030,123 @@ func getInitContainerAllowedCPUsFromLogs(podNamespace, podName, cntName, logs st
 	return cpus
 }
 
-func checkAllocatedCPUsForResize(ctx context.Context, f *framework.Framework, stateBeforeResize []recordedState, expectedCpusInfo []containerCPUInfo, testPod *v1.Pod) []recordedState {
+// checkAllocatedCPUsForResize checks the CPU sets of the containers listed in expectedCpusInfo, all of them
+// with exclusive CPUs, and returns them keyed by container name. When stateBeforeResize is not nil, the CPU
+// sets are also compared with the ones recorded before the resize:
+//   - the baseline CPUs, recorded when the pod was created, are kept;
+//   - a container that keeps or increases its CPU count keeps all its CPUs, so a rejected or a memory only
+//     resize, and a resize of another container of the pod, leave the CPU set unchanged;
+//   - a container that decreases its CPU count only releases CPUs, and the released CPUs not taken by
+//     another container go back to the shared pool.
+//
+// In every case the running containers don't share CPUs with each other, with the reserved CPUs and with
+// the shared pool, and with the single-numa-node policy each of them runs on a single NUMA node.
+func checkAllocatedCPUsForResize(ctx context.Context, env resizeCheckEnv, stateBeforeResize map[string]recordedState, expectedCpusInfo []containerCPUInfo) map[string]recordedState {
 	// CPUManagerReconcilePeriod is set to 1 second during tests,
 	// to reduce flakiness this check includes a 5 second timeout.
 	const cpusetReconcilePeriodTimeout = 5 * time.Second
-	var currentState []recordedState
-	for i := range expectedCpusInfo {
-		if expectedCpusInfo[i].InitCtr {
+	f := env.f
+	testPod := env.testPod
+	currentState := make(map[string]recordedState, len(expectedCpusInfo))
+	// CPUs released by the containers scaling down
+	releasedCPUs := cpuset.New()
+	// CPUs of the containers still running
+	runningCPUs := cpuset.New()
+	hasExclusiveInitCtr := false
+	for _, info := range expectedCpusInfo {
+		var cpus cpuset.CPUSet
+		if info.InitCtr {
 			// when we get there the real initcontainer terminated, so we can only check its logs
 			ginkgo.By("checking if the expected cpuset was assigned")
-			logs, err := e2epod.GetPodLogs(ctx, f.ClientSet, testPod.Namespace, testPod.Name, expectedCpusInfo[i].Name)
-			framework.ExpectNoError(err, "expected log not found in init container [%s] of pod [%s]", expectedCpusInfo[i].Name, testPod.Name)
-			gomega.Expect(testPod).To(HaveInitContainerCPUsCount(expectedCpusInfo[i].Name, expectedCpusInfo[i].cpuCount, logs))
-			cpus := getInitContainerAllowedCPUsFromLogs(testPod.Namespace, testPod.Name, expectedCpusInfo[i].Name, logs)
-			if stateBeforeResize == nil {
-				currentState = append(currentState, recordedState{
-					assignedCPUs: cpus,
-					baselineCPUs: cpus,
-				})
-			} else {
-				ginkgo.By("checking if baseline CPU sets of regular init-container are a subset of assigned CPU sets after resize")
-				gomega.Expect(stateBeforeResize[i].baselineCPUs.IsSubsetOf(cpus)).To(gomega.BeTrueBecause("baseline CPU sets must be subset of assigned CPU sets after resize"))
-				currentState = append(currentState, recordedState{
-					assignedCPUs: cpus,
-					baselineCPUs: stateBeforeResize[i].baselineCPUs,
-				})
-			}
-		} else if expectedCpusInfo[i].SidecarCtr {
-			gomega.Eventually(ctx, testPod).
-				WithTimeout(cpusetReconcilePeriodTimeout).
-				WithPolling(f.Timeouts.Poll).
-				Should(HaveSidecarContainerCPUsCount(expectedCpusInfo[i].Name, expectedCpusInfo[i].cpuCount))
-			gomega.Consistently(ctx, testPod).
-				WithTimeout(5 * time.Second).
-				WithPolling(f.Timeouts.Poll).
-				Should(HaveSidecarContainerCPUsCount(expectedCpusInfo[i].Name, expectedCpusInfo[i].cpuCount))
-			cpus, _ := getContainerAllowedCPUs(testPod, expectedCpusInfo[i].Name, true)
-			if stateBeforeResize == nil {
-				currentState = append(currentState, recordedState{
-					assignedCPUs: cpus,
-					baselineCPUs: cpus,
-				})
-			} else {
-				ginkgo.By("checking if baseline CPU sets of sidecar container are a subset of assigned CPU sets after resize")
-				gomega.Expect(stateBeforeResize[i].baselineCPUs.IsSubsetOf(cpus)).To(gomega.BeTrueBecause("baseline CPU sets must be subset of assigned CPU sets after resize"))
-				currentState = append(currentState, recordedState{
-					assignedCPUs: cpus,
-					baselineCPUs: stateBeforeResize[i].baselineCPUs,
-				})
-			}
+			logs, err := e2epod.GetPodLogs(ctx, f.ClientSet, testPod.Namespace, testPod.Name, info.Name)
+			framework.ExpectNoError(err, "expected log not found in init container [%s] of pod [%s]", info.Name, testPod.Name)
+			gomega.Expect(testPod).To(HaveInitContainerCPUsCount(info.Name, info.cpuCount, logs))
+			cpus = getInitContainerAllowedCPUsFromLogs(testPod.Namespace, testPod.Name, info.Name, logs)
+			hasExclusiveInitCtr = true
 		} else {
+			countMatcher := HaveContainerCPUsCount(info.Name, info.cpuCount)
+			if info.SidecarCtr {
+				countMatcher = HaveSidecarContainerCPUsCount(info.Name, info.cpuCount)
+			}
 			gomega.Eventually(ctx, testPod).
 				WithTimeout(cpusetReconcilePeriodTimeout).
 				WithPolling(f.Timeouts.Poll).
-				Should(HaveContainerCPUsCount(expectedCpusInfo[i].Name, expectedCpusInfo[i].cpuCount))
+				Should(countMatcher)
 			gomega.Consistently(ctx, testPod).
 				WithTimeout(5 * time.Second).
 				WithPolling(f.Timeouts.Poll).
-				Should(HaveContainerCPUsCount(expectedCpusInfo[i].Name, expectedCpusInfo[i].cpuCount))
-			cpus, _ := getContainerAllowedCPUs(testPod, expectedCpusInfo[i].Name, false)
-			if stateBeforeResize == nil {
-				currentState = append(currentState, recordedState{
-					assignedCPUs: cpus,
-					baselineCPUs: cpus,
-				})
-			} else {
-				ginkgo.By("checking if baseline CPU sets of application container are a subset of assigned CPU sets after resize")
-				gomega.Expect(stateBeforeResize[i].baselineCPUs.IsSubsetOf(cpus)).To(gomega.BeTrueBecause("baseline CPU sets must be subset of assigned CPU sets after resize"))
-				currentState = append(currentState, recordedState{
-					assignedCPUs: cpus,
-					baselineCPUs: stateBeforeResize[i].baselineCPUs,
-				})
-			}
+				Should(countMatcher)
+			var err error
+			cpus, err = getContainerAllowedCPUs(testPod, info.Name, info.SidecarCtr)
+			framework.ExpectNoError(err, "failed to get the cpuset of container [%s] of pod [%s]", info.Name, testPod.Name)
+
+			ginkgo.By(fmt.Sprintf("checking if the CPUs %s of container %s are exclusive", cpus, info.Name))
+			gomega.Expect(cpus.Intersection(runningCPUs).IsEmpty()).To(gomega.BeTrueBecause(
+				"CPUs %s of container %s must not be used by other containers of the pod, which use %s", cpus, info.Name, runningCPUs))
+			gomega.Expect(cpus.Intersection(env.reservedCPUs).IsEmpty()).To(gomega.BeTrueBecause(
+				"CPUs %s of container %s must not include reserved CPUs %s", cpus, info.Name, env.reservedCPUs))
+			runningCPUs = runningCPUs.Union(cpus)
+		}
+		currentState[info.Name] = recordedState{
+			assignedCPUs: cpus,
+			baselineCPUs: cpus,
+		}
+		if stateBeforeResize == nil {
+			continue
+		}
+
+		before, ok := stateBeforeResize[info.Name]
+		gomega.Expect(ok).To(gomega.BeTrueBecause("container %s must have a recorded state before resize", info.Name))
+		ginkgo.By(fmt.Sprintf("checking if baseline CPU set %s of container %s is a subset of assigned CPU set %s after resize", before.baselineCPUs, info.Name, cpus))
+		gomega.Expect(before.baselineCPUs.IsSubsetOf(cpus)).To(gomega.BeTrueBecause(
+			"baseline CPU set %s of container %s must be a subset of assigned CPU set %s after resize", before.baselineCPUs, info.Name, cpus))
+		if cpus.Size() >= before.assignedCPUs.Size() {
+			ginkgo.By(fmt.Sprintf("checking if container %s keeps its CPUs %s", info.Name, before.assignedCPUs))
+			gomega.Expect(before.assignedCPUs.IsSubsetOf(cpus)).To(gomega.BeTrueBecause(
+				"container %s must keep its CPUs %s when its CPU count doesn't decrease, got %s", info.Name, before.assignedCPUs, cpus))
+		} else {
+			ginkgo.By(fmt.Sprintf("checking if container %s only releases CPUs from %s", info.Name, before.assignedCPUs))
+			gomega.Expect(cpus.IsSubsetOf(before.assignedCPUs)).To(gomega.BeTrueBecause(
+				"container %s must only release CPUs when its CPU count decreases, had %s, got %s", info.Name, before.assignedCPUs, cpus))
+			releasedCPUs = releasedCPUs.Union(before.assignedCPUs.Difference(cpus))
+		}
+		currentState[info.Name] = recordedState{
+			assignedCPUs: cpus,
+			baselineCPUs: before.baselineCPUs,
 		}
 	}
+
+	if env.singleNUMANode {
+		for _, info := range expectedCpusInfo {
+			if info.InitCtr {
+				continue
+			}
+			cpus := currentState[info.Name].assignedCPUs
+			numaNodes := 0
+			for _, count := range computeNUMADistribution(cpus) {
+				if count > 0 {
+					numaNodes++
+				}
+			}
+			gomega.Expect(numaNodes).To(gomega.Equal(1), "CPUs %s of container %s must be on a single NUMA node", cpus, info.Name)
+		}
+	}
+
+	// A terminated non-restartable init container keeps the CPUs the app containers didn't take,
+	// so a CPU released by an app container may still be assigned to it.
+	if hasExclusiveInitCtr {
+		releasedCPUs = cpuset.New()
+	}
+	releasedCPUs = releasedCPUs.Difference(runningCPUs)
+	ginkgo.By(fmt.Sprintf("checking if the shared pool doesn't use the CPUs %s and includes the released CPUs %s", runningCPUs, releasedCPUs))
+	gomega.Eventually(ctx, func(g gomega.Gomega) {
+		sharedCPUs, err := getContainerAllowedCPUs(env.sharedPoolPod, sharedPoolContainerName, false)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+		g.Expect(sharedCPUs.Intersection(runningCPUs).IsEmpty()).To(gomega.BeTrueBecause(
+			"shared pool %s must not use the exclusive CPUs %s", sharedCPUs, runningCPUs))
+		g.Expect(releasedCPUs.IsSubsetOf(sharedCPUs)).To(gomega.BeTrueBecause(
+			"released CPUs %s must go back to the shared pool %s", releasedCPUs, sharedCPUs))
+	}).WithTimeout(cpusetReconcilePeriodTimeout).WithPolling(f.Timeouts.Poll).Should(gomega.Succeed())
+
 	return currentState
 }
