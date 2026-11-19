@@ -927,6 +927,11 @@ func takeByTopologyNUMADistributedForResize(logger klog.Logger, topo *topology.C
 				})
 			}
 
+			// No subset can allocate the remainder, so this combo should be skip.
+			if remainder > 0 && bestLocalBalance == math.MaxFloat64 {
+				return Continue
+			}
+
 			// If alignBySocket is enabled, prefer combinations whose NUMA nodes
 			// are in one socket over any cross-socket combination. When comparing
 			// combinations in the same socket category, pick the one with the

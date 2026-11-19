@@ -1365,6 +1365,22 @@ func commonTakeByTopologyExtendedTestCasesForResize(t *testing.T) []takeByTopolo
 			expErr:        "",
 			expResult:     mustParseCPUSet(t, "43-47,75-79,96,101-105,171-174,203-206,229-232"),
 		},
+		// NUMA 0, 1 and 2 are in socket 0. Only the three NUMA nodes combination
+		// has enough CPUs, but none of its nodes has a full CPU group available
+		// for the remainder after accounting for retained and distributed CPUs.
+		// The combination must be rejected so allocation can fall back to packing.
+		{
+			description:   "Scale-up: 8 to 10 CPUs with alignBySocket, reject NUMA combination without a feasible remainder subset",
+			topo:          topoDualSocketMultiNumaPerSocketHTLarge,
+			availableCPUs: mustParseCPUSet(t, "0-1,16-19,32-35"),
+			allocatedCPUs: mustParseCPUSet(t, "0-1,16-18,32-34"),
+			baselineCPUs:  mustParseCPUSet(t, "0-1,16-18,32-34"),
+			numCPUs:       10,
+			cpuGroupSize:  2,
+			alignBySocket: true,
+			expErr:        "",
+			expResult:     mustParseCPUSet(t, "0-1,16-19,32-35"),
+		},
 		{
 			description:   "Scale-up: 16 to 48 CPUs, distribute 24 full cores across 3 NUMA nodes (1 NUMAs with allocatedCPUs + 2 more NUMA) from dual socket with multi-NUMA with HT",
 			topo:          topoDualSocketMultiNumaPerSocketHT,
