@@ -2101,7 +2101,6 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 		// runTogether lists pairs of containers that run at the same time, so must never share CPUs.
 		runTogether                     [][2]string
 		steps                           []resizeStep
-		podLevelResourcesEnabled        bool
 		podLevelResourceManagersEnabled bool
 	}{
 		// The policy skips the resizes of pods with pod-level resources. The resizes that would
@@ -2118,7 +2117,6 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 			steps: []resizeStep{
 				{containerName: "appContainer-0", cpus: "2000m", expSkipped: true},
 			},
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 		},
 		{
@@ -2133,7 +2131,6 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 			steps: []resizeStep{
 				{containerName: "appContainer-0", cpus: "6000m", expSkipped: true},
 			},
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 		},
 		{
@@ -2148,7 +2145,6 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 			steps: []resizeStep{
 				{containerName: "appContainer-0", cpus: "4000m", expSkipped: true},
 			},
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 		},
 		{
@@ -2269,7 +2265,6 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.description, func(t *testing.T) {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.PodLevelResources, testCase.podLevelResourcesEnabled)
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.PodLevelResourceManagers, testCase.podLevelResourceManagersEnabled)
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.InPlacePodVerticalScalingExclusiveCPUs, true)
 			logger, _ := ktesting.NewTestContext(t)
@@ -3130,7 +3125,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 				},
 			},
 			expDefaultCPUSet:                cpuset.New(0, 1, 3, 4, 5, 6, 7, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalAllocs:              1,
@@ -3155,7 +3149,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 				},
 			},
 			expDefaultCPUSet:                cpuset.New(0, 1, 3, 4, 5, 6, 7, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalAllocs:              1,
@@ -3182,7 +3175,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 				},
 			},
 			expDefaultCPUSet:                cpuset.New(0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalAllocs:              1,
@@ -3213,7 +3205,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 				},
 			},
 			expDefaultCPUSet:                cpuset.New(0, 1, 3, 4, 5, 7, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalAllocs:              3,
@@ -3247,7 +3238,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 				},
 			},
 			expDefaultCPUSet:                cpuset.New(0, 1, 3, 4, 5, 6, 7, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalAllocs:              4,
@@ -3283,7 +3273,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 				},
 			},
 			expDefaultCPUSet:                cpuset.New(0, 1, 3, 4, 5, 7, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalAllocs:              5,
@@ -3319,7 +3308,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 				},
 			},
 			expDefaultCPUSet:                cpuset.New(0, 1, 3, 4, 5, 7, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalAllocs:              5,
@@ -3344,7 +3332,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 			expErr:                          admission.NewEmptyPodSharedPoolError(fmt.Errorf("pod rejected, sum of exclusive container cpu requests equals pod budget, leaving no cpus for shared containers")),
 			expPodBaselines:                 state.ContainerCPUBaselines{},
 			expDefaultCPUSet:                cpuset.New(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalErrors: 1,
@@ -3365,7 +3352,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 			expErr:                          nil,
 			expPodBaselines:                 state.ContainerCPUBaselines{},
 			expDefaultCPUSet:                cpuset.New(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
-			podLevelResourcesEnabled:        true,
 			podLevelResourceManagersEnabled: true,
 			requiredMetrics: requiredMetrics{
 				expTotalErrors: 0,
@@ -3375,7 +3361,6 @@ func TestStaticPolicyAllocatePodWithInPlacePodVerticalScalingExclusiveCPUs(t *te
 
 	for _, testCase := range testCases {
 		t.Run(testCase.description, func(t *testing.T) {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.PodLevelResources, testCase.podLevelResourcesEnabled)
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.PodLevelResourceManagers, testCase.podLevelResourceManagersEnabled)
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.InPlacePodVerticalScalingExclusiveCPUs, true)
 
