@@ -1692,6 +1692,15 @@ func (p *staticPolicy) getPodTopologyHintsForResize(logger klog.Logger, s state.
 	for container := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
 		logger_ := klog.LoggerWithValues(logger, "containerName", container.Name)
 
+		// A resize that checkResizeFeasibility rejects for any container gets no pod-level
+		// preference. This way the topology manager doesn't reject it with a generic affinity
+		// error and Allocate reports the precise reason, e.g. a container moving from the
+		// shared to the exclusive pool.
+		if feasibility := p.checkResizeFeasibility(logger_, s, pod, container); feasibility.err != nil {
+			logger_.V(2).Info("CPU Manager pod hint generation skipped, resize is not feasible", "err", feasibility.err)
+			return nil
+		}
+
 		requestedCPUsByPodContainer := p.guaranteedCPUs(logger, pod, container)
 
 		cpusInUseByPodContainer, exists := s.GetCPUSet(string(pod.UID), container.Name)
@@ -1700,11 +1709,8 @@ func (p *staticPolicy) getPodTopologyHintsForResize(logger klog.Logger, s state.
 			continue
 		}
 
-		baselineCPUsByPodContainer, exists := s.GetBaselineCPUSet(string(pod.UID), container.Name)
-		if !exists {
-			logger_.V(2).Info("CPU Manager hint generation skipped, baseline entry doesn't exist but allocated exist, this is not expected")
-			return nil
-		}
+		// The baseline exists, checkResizeFeasibility fails for assigned CPUs without a baseline.
+		baselineCPUsByPodContainer, _ := s.GetBaselineCPUSet(string(pod.UID), container.Name)
 
 		if cpusInUseByPodContainer.Size() == requestedCPUsByPodContainer {
 			retainedCPUsByPod = retainedCPUsByPod.Union(cpusInUseByPodContainer)
@@ -2292,6 +2298,14 @@ func (p *staticPolicy) getTopologyHintsForResize(logger klog.Logger, s state.Sta
 		return nil
 	}
 
+	// A resize that checkResizeFeasibility rejects gets no preference. This way the topology
+	// manager doesn't reject it with a generic affinity error and Allocate reports the precise
+	// reason, e.g. a container moving from the shared to the exclusive pool.
+	if feasibility := p.checkResizeFeasibility(logger, s, pod, container); feasibility.err != nil {
+		logger.V(2).Info("CPU Manager hint generation skipped, resize is not feasible", "containerName", container.Name, "err", feasibility.err)
+		return nil
+	}
+
 	retained := cpuset.New()
 
 	// Get a list of available CPUs.
@@ -2302,11 +2316,8 @@ func (p *staticPolicy) getTopologyHintsForResize(logger klog.Logger, s state.Sta
 	// kubelet restart, for example.
 	if allocated, exists := s.GetCPUSet(string(pod.UID), container.Name); exists {
 
-		baselineCPUs, exists := s.GetBaselineCPUSet(string(pod.UID), container.Name)
-		if !exists {
-			logger.V(2).Info("CPU Manager hint generation skipped, baseline entry doesn't exist but allocated exist, this is not expected", "containerName", container.Name)
-			return nil
-		}
+		// The baseline exists, checkResizeFeasibility fails for assigned CPUs without a baseline.
+		baselineCPUs, _ := s.GetBaselineCPUSet(string(pod.UID), container.Name)
 
 		if allocated.Size() != requestedCPUsByPodContainer {
 			if allocated.Size() < requestedCPUsByPodContainer {
