@@ -2355,7 +2355,7 @@ func (p *staticPolicy) getTopologyHintsForResize(logger klog.Logger, s state.Sta
 // hints are preferred. NUMA node 0 alone is not possible, because the container holds only 4 CPUs there, and
 // NUMA node 1 alone is not possible, because the baseline is on NUMA node 0. So only the hint with NUMA node
 // mask {0,1} is generated, it is not preferred and the restricted policy rejects it, even though the container
-// already runs on both NUMA nodes.
+// already runs on both NUMA nodes. The topology manager rejects the resize as infeasible, so it is not retried.
 func (p *staticPolicy) generateCPUTopologyHintsForResize(availableCPUs cpuset.CPUSet, reusableCPUs cpuset.CPUSet, retainedCPUs cpuset.CPUSet, freeCPUs cpuset.CPUSet, request int) []topologymanager.TopologyHint {
 	// Initialize minAffinitySize to include all NUMA Nodes.
 	minAffinitySize := p.topology.CPUDetails.NUMANodes().Size()
