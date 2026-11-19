@@ -1135,6 +1135,35 @@ func TestStaticPolicyPodResizeCPUsSingleContainerPod(t *testing.T) {
 		},
 		{
 			staticPolicyResizeTest: staticPolicyResizeTest{
+				description: "SingleSocketHT, PodResize, Container in exclusively allocated pool, Decrease allocated CPUs below baseline to a fractional request",
+				topo:        topoSingleSocketHT,
+				pod: makeMultiContainerPodWithOptions(
+					nil,
+					[]*containerOptions{
+						{request: "4000m", limit: "4000m"}}, // 0-1, 4-5
+				),
+				qosClass:        v1.PodQOSGuaranteed,
+				podAllocated:    "4000m",
+				resizeLimit:     "2500m",
+				resizeRequest:   "2500m",
+				containerName:   "appContainer-0",
+				stAssignments:   state.ContainerCPUAssignments{},
+				stBaselines:     state.ContainerCPUBaselines{},
+				stDefaultCPUSet: cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+			},
+			// The fractional request is reported, not the baseline with the request rounded up to 3 CPUs.
+			expAllocErr: resizeFeasibilityError{
+				PodUID:        "podUID",
+				ContainerName: "appContainer-0",
+				CausedBy:      "cannot move container from exclusive to shared pool, (requested CPUs = 2500m)",
+			},
+			expDefaultCPUSetAfterAdd:        cpuset.New(2, 3, 6, 7),
+			expDefaultCPUSetAfterUpdate:     cpuset.New(2, 3, 6, 7),
+			expDefaultCPUSetSizeAfterResize: 4,
+			expDefaultCPUSetAfterRemove:     cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+		},
+		{
+			staticPolicyResizeTest: staticPolicyResizeTest{
 				description: "SingleSocketHT, PodResize, Container in shared pool with more than one core, Attempt to move to exclusively allocated pool",
 				topo:        topoSingleSocketHT,
 				pod: makeMultiContainerPodWithOptions(
@@ -2055,6 +2084,8 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 		containerName string
 		cpus          string
 		expErr        bool
+		// expErrCausedBy is the expected cause of the resize feasibility error, checked when not empty.
+		expErrCausedBy string
 		// expCPUs is the expected allocation of the resized container, checked when not empty.
 		expCPUs cpuset.CPUSet
 		// expSkipped is whether the policy is expected to skip the resize, which keeps the
@@ -2213,6 +2244,27 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 				{containerName: "appContainer-0", cpus: "4000m", expCPUs: cpuset.New(0, 1, 4, 5)},
 			},
 		},
+		{
+			description: "Resize of a non-restartable init container with exclusive CPUs is rejected, also to a fractional request",
+			pod: makeMultiContainerPodWithOptions(
+				[]*containerOptions{
+					{request: "2000m", limit: "2000m"},
+				},
+				[]*containerOptions{
+					{request: "2000m", limit: "2000m"},
+				},
+			),
+			stAssignments:   state.ContainerCPUAssignments{},
+			stBaselines:     state.ContainerCPUBaselines{},
+			stDefaultCPUSet: cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+			// initContainer-0 terminates before appContainer-0 starts, so they may share CPUs.
+			runTogether: nil,
+			steps: []resizeStep{
+				{containerName: "initContainer-0", cpus: "4000m", expErr: true, expErrCausedBy: "not allowed to resize non-restartable init-container with exclusively allocated pool, (requestedCPUs = 4, assignedCPUs = 0,4)"},
+				// 1500m rounds up to 2 CPUs, the number of the assigned CPUs.
+				{containerName: "initContainer-0", cpus: "1500m", expErr: true, expErrCausedBy: "not allowed to resize non-restartable init-container with exclusively allocated pool, (requestedCPUs = 1500m, assignedCPUs = 0,4)"},
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -2276,6 +2328,10 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 				}
 				if step.expErr {
 					require.Error(t, err, "resize of %s to %s: expected an error, assignments %v", step.containerName, step.cpus, st.GetCPUAssignments())
+					if step.expErrCausedBy != "" {
+						expErr := resizeFeasibilityError{PodUID: podUID, ContainerName: step.containerName, CausedBy: step.expErrCausedBy}
+						require.Equal(t, expErr, err, "resize of %s to %s", step.containerName, step.cpus)
+					}
 				} else if step.expSkipped {
 					require.NoError(t, err, "resize of %s to %s", step.containerName, step.cpus)
 					pod = resized

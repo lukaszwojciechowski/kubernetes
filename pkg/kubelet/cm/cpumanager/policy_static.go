@@ -2107,7 +2107,9 @@ func (p *staticPolicy) checkResizeFeasibility(logger klog.Logger, s state.State,
 			return initContainer.Name != container.Name || podutil.IsRestartableInitContainer(initContainer)
 		})
 
-	if isNonRestartableInitContainer && requestedCPUsByPodContainer != cpusInUseByPodContainer.Size() {
+	// Compare milli-CPUs, requestedCPUsByPodContainer is rounded up for a fractional request,
+	// so it can be equal to the number of assigned CPUs also when the request changed.
+	if isNonRestartableInitContainer && requestedCPUsQuantity.MilliValue() != int64(cpusInUseByPodContainer.Size())*1000 {
 		return resizeFeasibility{
 			requestedCPUsByPodContainer: requestedCPUsByPodContainer,
 			cpusInUseByPodContainer:     cpuset.New(),
@@ -2192,6 +2194,22 @@ func (p *staticPolicy) checkResizeFeasibility(logger klog.Logger, s state.State,
 		}
 	}
 
+	// Checked before the comparison with the baseline, requestedCPUsByPodContainer is rounded up
+	// for a fractional request, so the comparison would report a number of CPUs never requested.
+	if !inExclusiveCPUPool(requestedCPUsQuantity) {
+		return resizeFeasibility{
+			requestedCPUsByPodContainer: requestedCPUsByPodContainer,
+			cpusInUseByPodContainer:     cpuset.New(),
+			baselineCPUs:                cpuset.New(),
+			skipResize:                  true,
+			err: resizeFeasibilityError{
+				PodUID:        string(pod.UID),
+				ContainerName: container.Name,
+				CausedBy:      "cannot move container from exclusive to shared pool, (requested CPUs = " + requestedCPUsQuantity.String() + ")",
+			},
+		}
+	}
+
 	baselineCPUsQuantity := baselineCPUs.Size()
 	if requestedCPUsByPodContainer < baselineCPUsQuantity {
 		return resizeFeasibility{
@@ -2203,20 +2221,6 @@ func (p *staticPolicy) checkResizeFeasibility(logger klog.Logger, s state.State,
 				PodUID:        string(pod.UID),
 				ContainerName: container.Name,
 				CausedBy:      "not allowed to reduce container exclusively allocated pool below baseline, (baseline CPUs = " + strconv.Itoa(baselineCPUsQuantity) + ", requested CPUs = " + strconv.Itoa(requestedCPUsByPodContainer) + ")",
-			},
-		}
-	}
-
-	if !inExclusiveCPUPool(requestedCPUsQuantity) {
-		return resizeFeasibility{
-			requestedCPUsByPodContainer: requestedCPUsByPodContainer,
-			cpusInUseByPodContainer:     cpuset.New(),
-			baselineCPUs:                cpuset.New(),
-			skipResize:                  true,
-			err: resizeFeasibilityError{
-				PodUID:        string(pod.UID),
-				ContainerName: container.Name,
-				CausedBy:      "cannot move container from exclusive to shared pool, (requested CPUs = " + requestedCPUsQuantity.String() + ")",
 			},
 		}
 	}
