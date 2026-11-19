@@ -398,7 +398,10 @@ func (a *cpuAccumulatorForResize) sortAvailableCPUsPacked() []int {
 //     once every physical core has contributed a CPU.
 //
 // Same as cpuAccumulator.sortAvailableCPUsSpread, except sockets are ordered with
-// cpuAccumulatorForResize.sortAvailableSockets to keep retained CPUs' sockets first.
+// cpuAccumulatorForResize.sortAvailableSockets to keep retained CPUs' sockets first,
+// and CPUs already taken by this container count as the first CPUs of their core,
+// so a free sibling of a retained CPU is only used once every other core has
+// contributed a CPU.
 func (a *cpuAccumulatorForResize) sortAvailableCPUsSpread() []int {
 	var result []int
 	for _, socket := range a.sortAvailableSockets() {
@@ -408,18 +411,22 @@ func (a *cpuAccumulatorForResize) sortAvailableCPUsSpread() []int {
 		// this stage only cares about physical-core coverage.
 		a.sort(cores, a.details.CPUsInCores)
 		cpusPerCore := make([][]int, 0, len(cores))
+		takenPerCore := make([]int, 0, len(cores))
 		maxCPUsPerCore := 0
 		for _, core := range cores {
 			cpus := a.details.CPUsInCores(core).List()
+			taken := a.resultDetails.CPUsInCores(core).Size()
 			cpusPerCore = append(cpusPerCore, cpus)
-			if len(cpus) > maxCPUsPerCore {
-				maxCPUsPerCore = len(cpus)
+			takenPerCore = append(takenPerCore, taken)
+			if taken+len(cpus) > maxCPUsPerCore {
+				maxCPUsPerCore = taken + len(cpus)
 			}
 		}
 		for cpuIndex := 0; cpuIndex < maxCPUsPerCore; cpuIndex++ {
-			for _, cpus := range cpusPerCore {
-				if cpuIndex < len(cpus) {
-					result = append(result, cpus[cpuIndex])
+			for i, cpus := range cpusPerCore {
+				// A core joins the round-robin after as many passes as CPUs it already holds for this container.
+				if freeIndex := cpuIndex - takenPerCore[i]; freeIndex >= 0 && freeIndex < len(cpus) {
+					result = append(result, cpus[freeIndex])
 				}
 			}
 		}
