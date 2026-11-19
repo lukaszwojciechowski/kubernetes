@@ -309,11 +309,6 @@ func newCPUAccumulatorForResize(logger klog.Logger, topo *topology.CPUTopology, 
 		// at admission time, prior to any resize, if those exist.
 		if numCPUs < currentlyAllocatedCPUs.Size() {
 			if !baselineCPUs.IsEmpty() {
-				// If explicitly CPUs to keep
-				// during scale down is given ( this requires
-				// addition in container[].resources ... which
-				// could be possible to patch ? Esotsal Note This means
-				// modifying API code
 				acc.take(baselineCPUs.Clone())
 			}
 		}
@@ -326,9 +321,9 @@ func newCPUAccumulatorForResize(logger klog.Logger, topo *topology.CPUTopology, 
 	}
 
 	if topo.NumSockets >= topo.NumNUMANodes {
-		// If sockets are higher or same in the memory hierarchy than NUMA nodes , then we take
+		// If NUMA nodes are higher or same in the memory hierarchy than sockets, then we take
 		// from the set of NUMA Nodes as the first level for resize, and from the set of sockets
-		//  as the second level for resize.
+		// as the second level for resize.
 		acc.numaOrSocketsFirst = &numaFirstForResize{
 			acc: acc,
 			resizeTakeOrder: resizeTakeOrder{
@@ -337,9 +332,9 @@ func newCPUAccumulatorForResize(logger klog.Logger, topo *topology.CPUTopology, 
 			},
 		}
 	} else {
-		// If NUMA nodes are higher in the memory hierarchy than NUMA nodes , then we take
+		// If sockets are higher in the memory hierarchy than NUMA nodes, then we take
 		// from the set of sockets as the first level for resize, and from the set of NUMA Nodes
-		//  as the second level for resize.
+		// as the second level for resize.
 		acc.numaOrSocketsFirst = &socketsFirstForResize{
 			acc: acc,
 			resizeTakeOrder: resizeTakeOrder{
