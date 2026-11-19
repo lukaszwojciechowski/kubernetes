@@ -1097,15 +1097,18 @@ func (p *staticPolicy) allocateForResize(logger klog.Logger, s state.State, pod 
 		return err
 	}
 
-	s.SetCPUSet(string(pod.UID), container.Name, newallocatedcpuset.CPUs)
-	// Update the shared CPUSet. CPUs released on scale down may still be assigned to a sibling,
-	// e.g. CPUs of a terminated non-restartable init container taken from reusableCPUs on a
-	// previous scale up, so keep them out of the shared CPUSet, as RemoveContainer does.
+	// Update the CPUSet of the container and the shared CPUSet. GetCPUAffinity reads the state
+	// without the CPU manager lock, so order the updates to never have a CPU both assigned to
+	// the container and in the shared CPUSet.
 	if resizeFeasibility.cpusInUseByPodContainer.Size() < newallocatedcpuset.CPUs.Size() {
-		// Scale up
+		// Scale up, remove the CPUs from the shared CPUSet first, as allocateCPUs does.
 		s.SetDefaultCPUSet(s.GetDefaultCPUSet().Difference(newallocatedcpuset.CPUs))
+		s.SetCPUSet(string(pod.UID), container.Name, newallocatedcpuset.CPUs)
 	} else {
-		// Scale down
+		// Scale down. CPUs released may still be assigned to a sibling, e.g. CPUs of a
+		// terminated non-restartable init container taken from reusableCPUs on a previous
+		// scale up, so keep them out of the shared CPUSet, as RemoveContainer does.
+		s.SetCPUSet(string(pod.UID), container.Name, newallocatedcpuset.CPUs)
 		cpusToRelease := resizeFeasibility.cpusInUseByPodContainer.Difference(newallocatedcpuset.CPUs).Difference(getAssignedCPUsOfSiblings(s, string(pod.UID), container.Name))
 		s.SetDefaultCPUSet(s.GetDefaultCPUSet().Union(cpusToRelease))
 	}
@@ -1114,8 +1117,6 @@ func (p *staticPolicy) allocateForResize(logger klog.Logger, s state.State, pod 
 	metrics.ResourceManagerContainerAssignments.WithLabelValues(metrics.ResourceManagerCPU, metrics.ResourceManagerExclusiveNode).Inc()
 
 	logger.V(4).Info("Allocated exclusive CPUs for resize", "cpuset", newallocatedcpuset.CPUs.String())
-	// Updated state to the checkpoint file will be stored during
-	// the reconcile loop.
 	// TODO Follow IPRR expected model, admission decides whether kubelet can accept the resize,
 	// and nothing is committed until every admit handler has passed and the allocation is persisted; actuation then happens in syncPod.
 	// https://github.com/kubernetes/kubernetes/pull/140629#discussion_r4273387867
