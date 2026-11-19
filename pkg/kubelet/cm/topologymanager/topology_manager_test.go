@@ -313,6 +313,7 @@ func TestAdmit(t *testing.T) {
 		qosClass              v1.PodQOSClass
 		policy                Policy
 		hp                    []HintProvider
+		operation             lifecycle.Operation
 		expected              bool
 		expectedReason        string
 		expectedRejectionType lifecycle.RejectionType
@@ -578,6 +579,48 @@ func TestAdmit(t *testing.T) {
 			expectedRejectionType: lifecycle.RejectionBlocked,
 		},
 		{
+			name:     "QOSClass set as Guaranteed. Restricted Policy. No Preferred affinity. Pod update.",
+			qosClass: v1.PodQOSGuaranteed,
+			policy:   restrictedPolicy,
+			hp: []HintProvider{
+				&mockHintProvider{
+					th: map[string][]TopologyHint{
+						"resource": {
+							{
+								NUMANodeAffinity: NewTestBitMask(0, 1),
+								Preferred:        false,
+							},
+						},
+					},
+				},
+			},
+			operation:             lifecycle.UpdateOperation,
+			expected:              false,
+			expectedReason:        ErrorTopologyAffinity,
+			expectedRejectionType: lifecycle.RejectionInfeasible,
+		},
+		{
+			name:     "QOSClass set as Guaranteed. single-numa-node Policy. Preferred affinity on two NUMA nodes. Pod update.",
+			qosClass: v1.PodQOSGuaranteed,
+			policy:   singleNumaPolicy,
+			hp: []HintProvider{
+				&mockHintProvider{
+					th: map[string][]TopologyHint{
+						"resource": {
+							{
+								NUMANodeAffinity: NewTestBitMask(0, 1),
+								Preferred:        true,
+							},
+						},
+					},
+				},
+			},
+			operation:             lifecycle.UpdateOperation,
+			expected:              false,
+			expectedReason:        ErrorTopologyAffinity,
+			expectedRejectionType: lifecycle.RejectionInfeasible,
+		},
+		{
 			name:     "QOSClass set as Guaranteed. single-numa-node Policy. Allocation rejected by the HintProvider",
 			qosClass: v1.PodQOSGuaranteed,
 			policy:   singleNumaPolicy,
@@ -677,7 +720,8 @@ func TestAdmit(t *testing.T) {
 			}
 
 			podAttr := lifecycle.PodAdmitAttributes{
-				Pod: pod,
+				Pod:       pod,
+				Operation: tc.operation,
 			}
 
 			// Container scope Admit
@@ -702,6 +746,33 @@ func TestAdmit(t *testing.T) {
 			}
 			if !podActual.Admit && podActual.RejectionType != tc.expectedRejectionType {
 				t.Errorf("Error occurred, expected RejectionType in result to be %v got %v", tc.expectedRejectionType, podActual.RejectionType)
+			}
+		})
+	}
+}
+
+func TestTopologyAffinityErrorRejectionType(t *testing.T) {
+	tcases := []struct {
+		name      string
+		operation lifecycle.Operation
+		expected  lifecycle.RejectionType
+	}{{
+		name:      "pod add is blocked",
+		operation: lifecycle.AddOperation,
+		expected:  lifecycle.RejectionBlocked,
+	}, {
+		name:      "pod update is infeasible",
+		operation: lifecycle.UpdateOperation,
+		expected:  lifecycle.RejectionInfeasible,
+	}}
+
+	for _, tc := range tcases {
+		t.Run(tc.name, func(t *testing.T) {
+			if actual := NewTopologyAffinityError(tc.operation).RejectionType(); actual != tc.expected {
+				t.Errorf("Expected TopologyAffinityError RejectionType to be %v got %v", tc.expected, actual)
+			}
+			if actual := NewPodLevelTopologyAffinityError("", tc.operation).RejectionType(); actual != tc.expected {
+				t.Errorf("Expected PodLevelTopologyAffinityError RejectionType to be %v got %v", tc.expected, actual)
 			}
 		})
 	}
