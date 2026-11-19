@@ -3182,6 +3182,40 @@ func TestRetryPendingResizesPodLevelResourcesExclusiveCPUs(t *testing.T) {
 		},
 		change: func(pod *v1.Pod) { setCPU(&pod.Spec.Containers[exclusive].Resources, "2", "2") },
 	}, {
+		name: "pod-level resources added with exclusive CPUs and without PodLevelResourceManagers",
+		prepare: func(pod *v1.Pod) {
+			pod.Spec.Resources = nil
+			pod.Spec.Containers = pod.Spec.Containers[:ineligible]
+		},
+		change: func(pod *v1.Pod) {
+			podLevelResources := resources("4", "4", "4Gi", "4Gi")
+			pod.Spec.Resources = &podLevelResources
+		},
+		podLevelResourceManagersDisabled: true,
+		expectInfeasible:                 true,
+	}, {
+		name: "pod-level resources with a non-integral CPU request added with exclusive CPUs",
+		prepare: func(pod *v1.Pod) {
+			pod.Spec.Resources = nil
+			pod.Spec.Containers = pod.Spec.Containers[:ineligible]
+		},
+		change: func(pod *v1.Pod) {
+			podLevelResources := resources("3500m", "3500m", "4Gi", "4Gi")
+			pod.Spec.Resources = &podLevelResources
+		},
+		expectInfeasible: true,
+	}, {
+		name: "pod-level resources added without exclusive CPUs and without PodLevelResourceManagers",
+		prepare: func(pod *v1.Pod) {
+			pod.Spec.Resources = nil
+			pod.Spec.Containers = pod.Spec.Containers[shared:ineligible]
+		},
+		change: func(pod *v1.Pod) {
+			podLevelResources := resources("4", "4", "4Gi", "4Gi")
+			pod.Spec.Resources = &podLevelResources
+		},
+		podLevelResourceManagersDisabled: true,
+	}, {
 		name:                             "container scaled up without PodLevelResourceManagers",
 		change:                           func(pod *v1.Pod) { setCPU(&pod.Spec.Containers[exclusive].Resources, "2", "2") },
 		podLevelResourceManagersDisabled: true,

@@ -231,6 +231,18 @@ func (h *podResizesAdmitHandler) disallowContainerChangesForPodLevelExclusiveRes
 // allocates exclusive CPUs for such a pod only when the pod is admitted and skips its resizes, so
 // the allocation would no longer match the pod.
 func exclusiveCPUsResizeRequiredForPodLevelResources(pod, allocatedPod *v1.Pod) bool {
+	if !resourcehelper.IsPodLevelResourcesSet(pod) {
+		return false
+	}
+	if !resourcehelper.IsPodLevelResourcesSet(allocatedPod) {
+		// The static policy skips container-level resize allocation as soon as pod-level
+		// resources are set, even when PodLevelResourceManagers is disabled.
+		for container := range podutil.ContainerIter(&allocatedPod.Spec, podutil.InitContainers|podutil.Containers) {
+			if containerExclusiveCPUs(container) > 0 {
+				return true
+			}
+		}
+	}
 	if !utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) || !resourcehelper.IsPodLevelResourcesSet(pod) {
 		return false
 	}
