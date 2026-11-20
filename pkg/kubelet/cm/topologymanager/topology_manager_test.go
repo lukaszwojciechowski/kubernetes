@@ -313,6 +313,7 @@ func TestAdmit(t *testing.T) {
 		policy                Policy
 		hp                    []HintProvider
 		operation             lifecycle.Operation
+		resizeExclusiveCPUs   bool
 		expected              bool
 		expectedReason        string
 		expectedRejectionType lifecycle.RejectionType
@@ -594,6 +595,7 @@ func TestAdmit(t *testing.T) {
 				},
 			},
 			operation:             lifecycle.UpdateOperation,
+			resizeExclusiveCPUs:   true,
 			expected:              false,
 			expectedReason:        ErrorTopologyAffinity,
 			expectedRejectionType: lifecycle.RejectionInfeasible,
@@ -615,9 +617,31 @@ func TestAdmit(t *testing.T) {
 				},
 			},
 			operation:             lifecycle.UpdateOperation,
+			resizeExclusiveCPUs:   true,
 			expected:              false,
 			expectedReason:        ErrorTopologyAffinity,
 			expectedRejectionType: lifecycle.RejectionInfeasible,
+		},
+		{
+			name:     "QOSClass set as Guaranteed. Restricted Policy. No Preferred affinity. Pod update. InPlacePodVerticalScalingExclusiveCPUs disabled.",
+			qosClass: v1.PodQOSGuaranteed,
+			policy:   restrictedPolicy,
+			hp: []HintProvider{
+				&mockHintProvider{
+					th: map[string][]TopologyHint{
+						"resource": {
+							{
+								NUMANodeAffinity: NewTestBitMask(0, 1),
+								Preferred:        false,
+							},
+						},
+					},
+				},
+			},
+			operation:             lifecycle.UpdateOperation,
+			expected:              false,
+			expectedReason:        ErrorTopologyAffinity,
+			expectedRejectionType: lifecycle.RejectionBlocked,
 		},
 		{
 			name:     "QOSClass set as Guaranteed. single-numa-node Policy. Allocation rejected by the HintProvider",
@@ -696,6 +720,7 @@ func TestAdmit(t *testing.T) {
 	for _, tc := range tcases {
 		t.Run(tc.name, func(t *testing.T) {
 			tCtx := ktesting.Init(t)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScalingExclusiveCPUs, tc.resizeExclusiveCPUs)
 
 			ctnScopeManager := manager{}
 			ctnScopeManager.scope = NewContainerScope(tc.policy)
@@ -752,21 +777,34 @@ func TestAdmit(t *testing.T) {
 
 func TestTopologyAffinityErrorRejectionType(t *testing.T) {
 	tcases := []struct {
-		name      string
-		operation lifecycle.Operation
-		expected  lifecycle.RejectionType
+		name                string
+		operation           lifecycle.Operation
+		resizeExclusiveCPUs bool
+		expected            lifecycle.RejectionType
 	}{{
 		name:      "pod add is blocked",
 		operation: lifecycle.AddOperation,
 		expected:  lifecycle.RejectionBlocked,
 	}, {
-		name:      "pod update is infeasible",
+		name:                "pod add is blocked with InPlacePodVerticalScalingExclusiveCPUs enabled",
+		operation:           lifecycle.AddOperation,
+		resizeExclusiveCPUs: true,
+		expected:            lifecycle.RejectionBlocked,
+	}, {
+		name:      "pod update is blocked",
 		operation: lifecycle.UpdateOperation,
-		expected:  lifecycle.RejectionInfeasible,
+		expected:  lifecycle.RejectionBlocked,
+	}, {
+		name:                "pod update is infeasible with InPlacePodVerticalScalingExclusiveCPUs enabled",
+		operation:           lifecycle.UpdateOperation,
+		resizeExclusiveCPUs: true,
+		expected:            lifecycle.RejectionInfeasible,
 	}}
 
 	for _, tc := range tcases {
 		t.Run(tc.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScalingExclusiveCPUs, tc.resizeExclusiveCPUs)
+
 			if actual := NewTopologyAffinityError(tc.operation).RejectionType(); actual != tc.expected {
 				t.Errorf("Expected TopologyAffinityError RejectionType to be %v got %v", tc.expected, actual)
 			}
