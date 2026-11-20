@@ -1233,23 +1233,17 @@ func (p *staticPolicy) allocateCPUsForResize(logger klog.Logger, s state.State, 
 	// and if requested CPUs is less than size of baselineCPUs.
 	// Those were checked at checkResizeFeasibility function and returned error
 	// for pod container using exclusive CPUs, making the resize Infeasible.
-	allocatableCPUs := baselineCPUs.Clone()
-	if requestedCPUs >= currentlyAllocatedCPUs.Size() {
-		allocatableCPUs = allocatableCPUs.Union(p.GetAvailableCPUs(s).Union(reusableCPUs).Union(currentlyAllocatedCPUs.Clone()))
-	} else if requestedCPUs < currentlyAllocatedCPUs.Size() {
-		allocatableCPUs = currentlyAllocatedCPUs.Clone()
-	}
-
-	// Initiate result with CPUs that must be kept:
-	// * currently allocated for scale up;
-	// * baseline for scale down.
+	//
+	// Set the CPUs that can be allocated and initiate result with CPUs that must be kept:
+	// * scale up: available and reusable CPUs can be added, currently allocated CPUs are kept;
+	// * scale down: only currently allocated CPUs can be used, baseline CPUs are kept.
+	var allocatableCPUs cpuset.CPUSet
 	result := topology.EmptyAllocation()
-	// We don't check if currentlyAllocatedCPUs or baselineCPUs are empty,
-	// Those were checked at checkResizeFeasibility function and returned error
-	// for pod container using exclusive CPUs, making the resize Infeasible.
 	if requestedCPUs >= currentlyAllocatedCPUs.Size() {
+		allocatableCPUs = baselineCPUs.Union(p.GetAvailableCPUs(s)).Union(reusableCPUs).Union(currentlyAllocatedCPUs)
 		result.CPUs = currentlyAllocatedCPUs.Clone()
 	} else {
+		allocatableCPUs = currentlyAllocatedCPUs.Clone()
 		result.CPUs = baselineCPUs.Clone()
 	}
 
