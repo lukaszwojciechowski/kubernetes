@@ -1659,13 +1659,18 @@ func (p *staticPolicy) getPodTopologyHintsForAdd(logger klog.Logger, s state.Sta
 				if allocated.Size() != requestedByContainer {
 					if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScalingExclusiveCPUs) {
 						// Handled as a resize, see allocateForAdd.
-						// TODO(#140629): return hints that cannot be satisfied if the
-						// resize is not feasible. allocateForAdd returns before it
-						// looks at the state for a container with no exclusive CPU
-						// request, so Allocate does not reject such a pod, as it
-						// does for an update.
 						logger_.Info("CPUs already allocated to container with different number than request, generating hints for a resize", "requestedByContainer", requestedByContainer, "allocatedSize", allocated.Size())
-						return p.getPodTopologyHintsForResize(logger, s, pod)
+						if hints := p.getPodTopologyHintsForResize(logger, s, pod); hints != nil {
+							return hints
+						}
+						// The resize of the readmitted pod gets no pod-level
+						// preference, because it is not feasible or not supported.
+						// Unlike an update, Allocate does not reject the pod then:
+						// allocateForAdd returns before it looks at the state for a
+						// container with no exclusive CPU request. Fall through to
+						// the hints that cannot be satisfied, as without the feature
+						// gate, so that the pod is not admitted without alignment.
+						logger_.V(2).Info("Resize of the readmitted pod has no pod-level preference, generating hints that cannot be satisfied")
 					}
 					logger_.Info("CPUs already allocated to container with different number than request", "requestedByContainer", requestedByContainer, "allocatedSize", allocated.Size())
 					// An empty list of hints will be treated as a preference that cannot be satisfied.

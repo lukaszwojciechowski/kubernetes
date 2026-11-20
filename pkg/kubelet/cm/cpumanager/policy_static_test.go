@@ -3894,3 +3894,62 @@ func TestStaticPolicyAddWithResizedAllocationExclusiveCPUs(t *testing.T) {
 		})
 	}
 }
+
+// TestStaticPolicyAddPodTopologyHintsWithResizedAllocation checks the pod-level
+// hints of a pod admitted again with a container whose CPU assignment differs
+// from its request, for example after a kubelet restart. A resize that cannot
+// be expressed as a pod-level preference must not leave the pod unaligned: on
+// the Add path Allocate does not reject it, because allocateForAdd returns
+// before it looks at the state for a container with no exclusive CPU request.
+func TestStaticPolicyAddPodTopologyHintsWithResizedAllocation(t *testing.T) {
+	testCases := []struct {
+		name string
+		// request is the CPU request of the resized container, which holds
+		// cpuset.New(0, 1) in the state.
+		request string
+		// expectSatisfiable tells whether the hints must have a preference. The
+		// hints that cannot be satisfied are an empty list of hints.
+		expectSatisfiable bool
+	}{
+		{
+			// The resize is not feasible, checkResizeFeasibility rejects moving
+			// a container from the exclusive to the shared pool.
+			name:    "a container moved to the shared pool",
+			request: "1500m",
+		},
+		{
+			name:              "a feasible resize keeps its preference",
+			request:           "4",
+			expectSatisfiable: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.InPlacePodVerticalScalingExclusiveCPUs, true)
+			logger, _ := ktesting.NewTestContext(t)
+			policy, err := NewStaticPolicy(logger, topoSingleSocketHT, 1, cpuset.New(), topologymanager.NewFakeManager(logger), nil)
+			require.NoError(t, err)
+
+			pod := makeMultiContainerPod(nil, []struct{ request, limit string }{
+				{tc.request, tc.request},
+				{"1", "1"},
+			})
+			s := state.NewMemoryState(logger)
+			s.SetCPUSet(string(pod.UID), "appContainer-0", cpuset.New(0, 1))
+			s.SetCPUSet(string(pod.UID), "appContainer-1", cpuset.New(2))
+			s.SetCPUBaselines(state.ContainerCPUBaselines{string(pod.UID): {
+				"appContainer-0": {Baseline: cpuset.New(0, 1)},
+				"appContainer-1": {Baseline: cpuset.New(2)},
+			}})
+			s.SetDefaultCPUSet(cpuset.New(3, 4, 5, 6, 7))
+
+			hints := policy.GetPodTopologyHints(logger, s, pod, lifecycle.AddOperation)
+			if tc.expectSatisfiable {
+				require.NotEmpty(t, hints[string(v1.ResourceCPU)], "the hints of the resize must be generated")
+				return
+			}
+			unsatisfiable := map[string][]topologymanager.TopologyHint{string(v1.ResourceCPU): {}}
+			require.Equal(t, unsatisfiable, hints, "the hints must not be satisfiable")
+		})
+	}
+}
