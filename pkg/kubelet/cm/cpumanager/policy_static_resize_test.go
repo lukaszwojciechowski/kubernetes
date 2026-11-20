@@ -2102,6 +2102,10 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 		runTogether                     [][2]string
 		steps                           []resizeStep
 		podLevelResourceManagersEnabled bool
+		// options are the options of the static policy.
+		options map[string]string
+		// cpusTakenAfterAdd are the CPUs another pod takes from the shared pool after the pod is added.
+		cpusTakenAfterAdd cpuset.CPUSet
 	}{
 		// The policy skips the resizes of pods with pod-level resources. The resizes that would
 		// change the exclusive CPUs of such a pod are rejected by the resize admit handler.
@@ -2241,6 +2245,30 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 			},
 		},
 		{
+			description: "Scale up with full-pcpus-only counts the init container CPUs no sibling uses as available",
+			pod: makeMultiContainerPodWithOptions(
+				[]*containerOptions{
+					{request: "4000m", limit: "4000m"},
+				},
+				[]*containerOptions{
+					{request: "2000m", limit: "2000m"},
+				},
+			),
+			stAssignments:     state.ContainerCPUAssignments{},
+			stBaselines:       state.ContainerCPUBaselines{},
+			stDefaultCPUSet:   cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
+			options:           map[string]string{FullPCPUsOnlyOption: "true"},
+			cpusTakenAfterAdd: cpuset.New(2, 3, 6, 7),
+			// initContainer-0 terminates before appContainer-0 starts, so they may share CPUs.
+			runTogether: nil,
+			steps: []resizeStep{
+				// The shared pool is empty, only the CPUs of initContainer-0 can be used.
+				{containerName: "appContainer-0", cpus: "4000m", expCPUs: cpuset.New(0, 1, 4, 5)},
+				// The CPUs of initContainer-0 are all taken over, none is left.
+				{containerName: "appContainer-0", cpus: "6000m", expErr: true},
+			},
+		},
+		{
 			description: "Resize of a non-restartable init container with exclusive CPUs is rejected, also to a fractional request",
 			pod: makeMultiContainerPodWithOptions(
 				[]*containerOptions{
@@ -2268,7 +2296,7 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.PodLevelResourceManagers, testCase.podLevelResourceManagersEnabled)
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.InPlacePodVerticalScalingExclusiveCPUs, true)
 			logger, _ := ktesting.NewTestContext(t)
-			policy, err := NewStaticPolicy(logger, topoSingleSocketHT, 0, cpuset.New(), topologymanager.NewFakeManager(logger), nil)
+			policy, err := NewStaticPolicy(logger, topoSingleSocketHT, 0, cpuset.New(), topologymanager.NewFakeManager(logger), testCase.options)
 			require.NoError(t, err)
 
 			st := &mockState{
@@ -2281,6 +2309,11 @@ func TestStaticPolicyPodResizeReusableCPUs(t *testing.T) {
 
 			for container := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
 				require.NoError(t, policy.Allocate(logger, st, pod, container, lifecycle.AddOperation), "Allocate() of container %s", container.Name)
+			}
+			if !testCase.cpusTakenAfterAdd.IsEmpty() {
+				require.True(t, testCase.cpusTakenAfterAdd.IsSubsetOf(st.GetDefaultCPUSet()), "CPUs %s are not in the shared pool %s", testCase.cpusTakenAfterAdd, st.GetDefaultCPUSet())
+				st.SetDefaultCPUSet(st.GetDefaultCPUSet().Difference(testCase.cpusTakenAfterAdd))
+				st.SetCPUSet("otherPod", "otherContainer", testCase.cpusTakenAfterAdd)
 			}
 			checkCPUs := func(t *testing.T) {
 				t.Helper()
