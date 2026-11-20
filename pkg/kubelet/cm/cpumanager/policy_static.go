@@ -554,7 +554,7 @@ func (p *staticPolicy) allocatePodForAdd(logger klog.Logger, s state.State, pod 
 	}
 
 	// 3. Enforce SMT alignment policy if FullPhysicalCPUsOnly is enabled.
-	if err := p.enforceSMTAlignment(s, totalPodCPUs, 0, lifecycle.AddOperation); err != nil {
+	if err := p.enforceSMTAlignment(s, totalPodCPUs, 0, cpuset.New(), lifecycle.AddOperation); err != nil {
 		return err
 	}
 
@@ -917,7 +917,10 @@ func podCPUAllocationToString(alloc map[string]cpuset.CPUSet) string {
 	return "<" + repr + ">"
 }
 
-func (p *staticPolicy) enforceSMTAlignment(s state.State, numCPUs int, currentlyAssignedCPUs int, operation lifecycle.Operation) error {
+// enforceSMTAlignment checks that numCPUs can be allocated as full physical cores. On resize,
+// currentlyAssignedCPUs is the number of CPUs the container has already, and reusableCPUs are the
+// other CPUs it can take over from its pod, e.g. the CPUs of terminated init containers.
+func (p *staticPolicy) enforceSMTAlignment(s state.State, numCPUs int, currentlyAssignedCPUs int, reusableCPUs cpuset.CPUSet, operation lifecycle.Operation) error {
 	if !p.options.FullPhysicalCPUsOnly {
 		return nil
 	}
@@ -940,7 +943,7 @@ func (p *staticPolicy) enforceSMTAlignment(s state.State, numCPUs int, currently
 		}
 	}
 
-	availablePhysicalCPUs := s.GetDefaultCPUSet().Difference(p.reservedPhysicalCPUs).Size() + currentlyAssignedCPUs
+	availablePhysicalCPUs := s.GetDefaultCPUSet().Union(reusableCPUs).Difference(p.reservedPhysicalCPUs).Size() + currentlyAssignedCPUs
 
 	// It's legal to reserve CPUs which are not core siblings. In this case the CPU allocator can descend to single cores
 	// when picking CPUs. This will void the guarantee of FullPhysicalCPUsOnly. To prevent this, we need to additionally consider
@@ -1031,7 +1034,7 @@ func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1
 		return nil
 	}
 
-	if err := p.enforceSMTAlignment(s, numCPUs, 0, lifecycle.AddOperation); err != nil {
+	if err := p.enforceSMTAlignment(s, numCPUs, 0, cpuset.New(), lifecycle.AddOperation); err != nil {
 		return err
 	}
 
@@ -1094,7 +1097,10 @@ func (p *staticPolicy) allocateForResize(logger klog.Logger, s state.State, pod 
 		}
 	}()
 
-	if err := p.enforceSMTAlignment(s, resizeFeasibility.requestedCPUsByPodContainer, resizeFeasibility.cpusInUseByPodContainer.Size(), lifecycle.UpdateOperation); err != nil {
+	// Get a list of reusable CPUs (e.g. CPUs reused from initContainers). It may include CPUs
+	// the container has already, which the SMT alignment check counts separately.
+	reusableCPUs := getReusableCPUsForResizeByPodContainer(s, pod, container)
+	if err := p.enforceSMTAlignment(s, resizeFeasibility.requestedCPUsByPodContainer, resizeFeasibility.cpusInUseByPodContainer.Size(), reusableCPUs.Difference(resizeFeasibility.cpusInUseByPodContainer), lifecycle.UpdateOperation); err != nil {
 		return err
 	}
 	logger.V(4).Info("Static policy: container already present in state, attempting InPlacePodVerticalScaling")
@@ -1103,7 +1109,7 @@ func (p *staticPolicy) allocateForResize(logger klog.Logger, s state.State, pod 
 	logger.Info("Topology Affinity", "affinity", hint)
 	// Attempt new allocation ( reusing allocated CPUs ) according to the NUMA affinity contained in the hint
 	// Since NUMA affinity container in the hint is unmutable already allocated CPUs pass the criteria
-	newallocatedcpuset, witherr := p.allocateCPUsForResize(logger, s, resizeFeasibility.requestedCPUsByPodContainer, hint.NUMANodeAffinity, getReusableCPUsForResizeByPodContainer(s, pod, container), resizeFeasibility.cpusInUseByPodContainer, resizeFeasibility.baselineCPUs)
+	newallocatedcpuset, witherr := p.allocateCPUsForResize(logger, s, resizeFeasibility.requestedCPUsByPodContainer, hint.NUMANodeAffinity, reusableCPUs, resizeFeasibility.cpusInUseByPodContainer, resizeFeasibility.baselineCPUs)
 	if witherr != nil {
 		err := resizeCPUAllocationError{
 			PodUID:        string(pod.UID),
